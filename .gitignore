@@ -1,0 +1,54 @@
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+.private/
+
+# Python
+.venv/
+venv/
+.tools/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+
+# Personal and runtime data
+data/
+uploads/
+resumes/
+exports/
+qdrant_resume_db/
+logs/
+*.log
+*.db
+*.db-*
+*.db-journal
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+debug_page.html
+51job_*.json
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/

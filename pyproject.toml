@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jobsearch-ai-assistant"
+version = "1.0.0"
+description = "智职引擎：面向大学生的每日求职雷达与投递闭环"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "沈以恒" },
+]
+keywords = ["job-search", "career", "rag", "llm", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "tzdata>=2025.2; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+ai = [
+    "openai>=2.32,<3",
+]
+mcp = [
+    "mcp[cli]>=1.27,<2",
+]
+crawler = [
+    "selenium>=4.30,<5",
+    "webdriver-manager>=4.0,<5",
+]
+files = [
+    "pymupdf>=1.25,<2",
+]
+all = [
+    "openai>=2.32,<3",
+    "mcp[cli]>=1.27,<2",
+    "selenium>=4.30,<5",
+    "webdriver-manager>=4.0,<5",
+    "pymupdf>=1.25,<2",
+]
+dev = [
+    "build>=1.2,<2",
+    "pytest>=8.3,<9",
+    "pytest-cov>=6,<7",
+    "ruff>=0.11,<1",
+]
+
+[project.scripts]
+jobsearch-web = "jobsearch_mcp_server.webapp:main"
+jobsearch-mcp-server = "jobsearch_mcp_server.server:main"
+
+[project.urls]
+Repository = "https://github.com/eatdrop/career-radar"
+Issues = "https://github.com/eatdrop/career-radar/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/jobsearch-ai-assistant/web" = ["web/index.html"]
+"share/jobsearch-ai-assistant/web/assets" = [
+    "web/assets/styles.css",
+    "web/assets/app.js",
+    "web/assets/favicon.svg",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [
+    ".private",
+    ".venv",
+    "src/jobsearch_mcp_server/resume_tools/rag_resume.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.coverage.run]
+source = ["jobsearch_mcp_server"]
+omit = [
+    "*/crawler/*",
+    "*/resume_tools/rag_resume.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

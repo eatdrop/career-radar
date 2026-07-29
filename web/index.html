@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="智职引擎每日求职雷达：自动聚合、过滤、匹配岗位，并给出逐岗简历建议。">
+  <title>智职引擎 · 每日求职雷达</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css?v=1.0.0">
+  <script src="/assets/app.js?v=1.0.0" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">Z</span>
+        <span>
+          <strong>智职引擎</strong>
+          <small>DAILY CAREER RADAR</small>
+        </span>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item is-active" type="button" data-panel="radar">
+          <span class="nav-glyph" aria-hidden="true">01</span>
+          <span>今日雷达</span>
+        </button>
+        <button class="nav-item" type="button" data-panel="preferences">
+          <span class="nav-glyph" aria-hidden="true">02</span>
+          <span>求职偏好</span>
+        </button>
+        <button class="nav-item" type="button" data-panel="resume">
+          <span class="nav-glyph" aria-hidden="true">03</span>
+          <span>简历画像</span>
+        </button>
+        <button class="nav-item" type="button" data-panel="jobs">
+          <span class="nav-glyph" aria-hidden="true">04</span>
+          <span>岗位池</span>
+        </button>
+        <button class="nav-item" type="button" data-panel="workshop">
+          <span class="nav-glyph" aria-hidden="true">05</span>
+          <span>简历工坊</span>
+        </button>
+        <button class="nav-item" type="button" data-panel="applications">
+          <span class="nav-glyph" aria-hidden="true">06</span>
+          <span>投递看板</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-card" role="status" aria-live="polite">
+        <span class="eyebrow">工作流状态</span>
+        <div class="service-state">
+          <span class="status-dot" id="sidebarStatusDot" aria-hidden="true"></span>
+          <strong id="sidebarStatusText">正在检查</strong>
+        </div>
+        <p id="sidebarStatusDetail">连接本地服务中…</p>
+      </div>
+
+      <div class="sidebar-footer">
+        <span>LOCAL FIRST</span>
+        <span>v1.0</span>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button class="icon-button mobile-menu" id="mobileMenuButton" type="button"
+                aria-controls="sidebar" aria-expanded="false" aria-label="打开导航">
+          <span></span><span></span><span></span>
+        </button>
+        <div>
+          <span class="eyebrow" id="pageKicker">AUTOMATED JOB HUNTING</span>
+          <h1 id="pageTitle">今日求职雷达</h1>
+        </div>
+        <div class="topbar-actions">
+          <div class="privacy-badge" title="数据默认保存在本机；启用 AI 优化时会按提示调用已配置模型">
+            <span aria-hidden="true">●</span> 本地数据
+          </div>
+          <button class="button button-primary button-compact" type="button"
+                  id="topRunRadarButton">运行今日雷达</button>
+        </div>
+      </header>
+
+      <main id="main-content" tabindex="-1">
+        <section class="panel is-active" id="panel-radar" data-panel-content="radar">
+          <div class="radar-hero">
+            <div class="hero-copy">
+              <span class="hero-label">DAILY JOB SIGNAL, NOT MORE NOISE</span>
+              <h2>别再反复刷岗位。<br><em>让值得投的岗位来找你。</em></h2>
+              <p>系统每天按你的城市、方向和校招门槛聚合岗位，先过滤噪声，再用简历证据排序，并给出每个岗位该怎么改。</p>
+              <div class="hero-actions">
+                <button class="button button-accent" type="button" id="runRadarButton">
+                  <span>立即跑一次</span>
+                  <span aria-hidden="true">↗</span>
+                </button>
+                <label class="demo-toggle">
+                  <input type="checkbox" id="radarUseDemo">
+                  <span>没有岗位数据？用演示数据验收</span>
+                </label>
+              </div>
+              <div class="next-run" id="nextRunText">定时任务尚未开启</div>
+            </div>
+            <div class="signal-card" aria-label="今日雷达摘要">
+              <div class="signal-card-head">
+                <span>今日信号</span>
+                <span class="live-pill" id="radarRunState">待运行</span>
+              </div>
+              <strong class="signal-number" id="radarShortlisted">0</strong>
+              <span class="signal-caption">个值得你花时间看的岗位</span>
+              <div class="signal-breakdown">
+                <div><strong id="radarCollected">0</strong><span>聚合</span></div>
+                <div><strong id="radarFiltered">0</strong><span>过滤后</span></div>
+                <div><strong id="radarRejected">0</strong><span>噪声拦截</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="workflow-strip" aria-label="每日求职雷达工作流">
+            <div class="workflow-node">
+              <span class="node-index">01</span>
+              <div><strong>多源聚合</strong><small>岗位池 · Google Jobs · 51job</small></div>
+            </div>
+            <span class="workflow-arrow" aria-hidden="true">→</span>
+            <div class="workflow-node">
+              <span class="node-index">02</span>
+              <div><strong>硬门槛过滤</strong><small>资深 · 年限 · 外包 · 排除词</small></div>
+            </div>
+            <span class="workflow-arrow" aria-hidden="true">→</span>
+            <div class="workflow-node">
+              <span class="node-index">03</span>
+              <div><strong>简历证据排序</strong><small>匹配项可解释，不给玄学分</small></div>
+            </div>
+            <span class="workflow-arrow" aria-hidden="true">→</span>
+            <div class="workflow-node">
+              <span class="node-index">04</span>
+              <div><strong>行动摘要</strong><small>逐岗建议 · 邮件 · 投递记录</small></div>
+            </div>
+          </div>
+
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">SHORTLIST</span>
+              <h2>今天先看这些</h2>
+              <p id="radarResultCaption">完成简历画像后运行雷达，系统会把最值得投的岗位放在这里。</p>
+            </div>
+            <button class="button button-secondary button-compact" type="button"
+                    data-switch-panel="preferences">调整筛选规则</button>
+          </div>
+          <div class="job-recommendations" id="radarResults"></div>
+          <div class="empty-state" id="radarEmpty">
+            <div class="empty-visual" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <h3>你的雷达还没有信号</h3>
+            <p>先建立简历画像，再导入岗位或使用演示数据跑通整条工作流。</p>
+            <div class="empty-actions">
+              <button class="button button-primary" type="button" data-switch-panel="resume">建立简历画像</button>
+              <button class="button button-secondary" type="button" data-switch-panel="jobs">准备岗位池</button>
+            </div>
+          </div>
+
+          <div class="two-column lower-grid">
+            <article class="surface">
+              <div class="surface-head">
+                <div><span class="eyebrow">FILTER LOG</span><h3>噪声是怎么被拦掉的</h3></div>
+              </div>
+              <div class="filter-log" id="radarFilterLog">
+                <p class="muted">运行后展示排除原因，方便你校准规则。</p>
+              </div>
+            </article>
+            <article class="surface">
+              <div class="surface-head">
+                <div><span class="eyebrow">RUN HISTORY</span><h3>最近运行</h3></div>
+              </div>
+              <div class="run-history" id="radarRunHistory">
+                <p class="muted">暂无运行记录。</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-preferences" data-panel-content="preferences">
+          <div class="page-intro">
+            <div>
+              <span class="eyebrow">SET ONCE, RUN DAILY</span>
+              <h2>把“什么值得看”说清楚</h2>
+              <p>先用硬规则排除明显不合适的岗位，再做匹配。比让大模型猜你的偏好更稳定，也更省钱。</p>
+            </div>
+            <div class="readiness" id="preferenceReadiness">未保存</div>
+          </div>
+
+          <form class="settings-layout" id="radarSettingsForm">
+            <div class="settings-main">
+              <article class="surface form-section">
+                <div class="section-number">01</div>
+                <div class="form-section-content">
+                  <h3>搜索范围</h3>
+                  <p>支持多个方向；定时聚合请求最多组合前 6 组关键词与城市。</p>
+                  <label class="field">
+                    <span>岗位关键词 <small>用逗号分隔</small></span>
+                    <input type="text" id="preferenceKeywords" required
+                           placeholder="AI应用开发, Python后端, RAG工程师">
+                  </label>
+                  <fieldset class="field">
+                    <legend>目标城市 <small>最多选择 5 个</small></legend>
+                    <div class="check-grid" id="cityCheckboxes">
+                      <label><input type="checkbox" value="北京">北京</label>
+                      <label><input type="checkbox" value="上海">上海</label>
+                      <label><input type="checkbox" value="广州">广州</label>
+                      <label><input type="checkbox" value="深圳">深圳</label>
+                      <label><input type="checkbox" value="杭州">杭州</label>
+                      <label><input type="checkbox" value="成都">成都</label>
+                      <label><input type="checkbox" value="南京">南京</label>
+                      <label><input type="checkbox" value="武汉">武汉</label>
+                      <label><input type="checkbox" value="西安">西安</label>
+                    </div>
+                  </fieldset>
+                </div>
+              </article>
+
+              <article class="surface form-section">
+                <div class="section-number">02</div>
+                <div class="form-section-content">
+                  <h3>岗位来源</h3>
+                  <p>岗位池永远可用；外部聚合与 51job 需单独配置，界面会明确显示可用状态。</p>
+                  <div class="source-options">
+                    <label class="source-option">
+                      <input type="checkbox" name="radarSource" value="latest">
+                      <span><strong>本地岗位池</strong><small>粘贴 JD 或实时采集后的岗位</small></span>
+                      <span class="source-state is-ready">随时可用</span>
+                    </label>
+                    <label class="source-option">
+                      <input type="checkbox" name="radarSource" value="serpapi">
+                      <span><strong>Google Jobs 聚合</strong><small>通过 SerpAPI 聚合公开职位</small></span>
+                      <span class="source-state" id="serpapiSourceState">待检查</span>
+                    </label>
+                    <label class="source-option">
+                      <input type="checkbox" name="radarSource" value="51job">
+                      <span><strong>51job 实时采集</strong><small>需要 Chrome 与爬虫组件</small></span>
+                      <span class="source-state" id="crawlerSourceState">待检查</span>
+                    </label>
+                    <label class="source-option">
+                      <input type="checkbox" name="radarSource" value="demo">
+                      <span><strong>演示岗位</strong><small>仅用于验收，不冒充真实结果</small></span>
+                      <span class="source-state is-demo">演示</span>
+                    </label>
+                  </div>
+                </div>
+              </article>
+
+              <article class="surface form-section">
+                <div class="section-number">03</div>
+                <div class="form-section-content">
+                  <h3>过滤与排序</h3>
+                  <label class="switch-row">
+                    <span><strong>优先校招 / 初级岗位</strong><small>自动排除 Senior、Lead、专家与 3 年以上经验门槛</small></span>
+                    <input type="checkbox" id="newGradOnly" role="switch">
+                  </label>
+                  <label class="field">
+                    <span>额外排除词 <small>用逗号分隔</small></span>
+                    <input type="text" id="excludeKeywords"
+                           placeholder="外包, 劳务, 销售, 5年以上">
+                  </label>
+                  <div class="range-row">
+                    <label class="field">
+                      <span>最低匹配分 <strong id="minScoreValue">55</strong></span>
+                      <input type="range" id="minScore" min="0" max="100" step="5" value="55">
+                    </label>
+                    <label class="field">
+                      <span>每日最多推荐</span>
+                      <select id="maxResults">
+                        <option value="10">10 个</option>
+                        <option value="20">20 个</option>
+                        <option value="30">30 个</option>
+                        <option value="50">50 个</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              </article>
+            </div>
+
+            <aside class="settings-side">
+              <article class="surface sticky-settings">
+                <span class="eyebrow">AUTOMATION</span>
+                <h3>每日自动运行</h3>
+                <label class="switch-row compact">
+                  <span><strong>启用定时雷达</strong><small>服务运行期间生效</small></span>
+                  <input type="checkbox" id="radarEnabled" role="switch">
+                </label>
+                <label class="field">
+                  <span>每天执行时间</span>
+                  <input type="time" id="scheduleTime" value="21:00">
+                </label>
+                <hr>
+                <label class="switch-row compact">
+                  <span><strong>邮件推送摘要</strong><small id="emailCapabilityText">检查 SMTP 中…</small></span>
+                  <input type="checkbox" id="emailEnabled" role="switch">
+                </label>
+                <label class="field">
+                  <span>收件邮箱</span>
+                  <input type="email" id="emailTo" placeholder="you@example.com">
+                </label>
+                <p class="form-note">邮箱密码只从服务端环境变量读取，不会保存在浏览器或数据库。</p>
+                <button class="button button-primary button-block" type="submit" id="saveSettingsButton">
+                  保存工作流
+                </button>
+              </article>
+            </aside>
+          </form>
+        </section>
+
+        <section class="panel" id="panel-resume" data-panel-content="resume">
+          <div class="page-intro">
+            <div>
+              <span class="eyebrow">YOUR EVIDENCE BASE</span>
+              <h2>先让系统真正读懂你的经历</h2>
+              <p>这不是“简历打分小游戏”。画像会成为每日匹配的证据底座，告诉系统你能做什么、还缺什么。</p>
+            </div>
+            <div class="privacy-callout">默认保存在本机 · AI 优化会明确提示外部处理</div>
+          </div>
+
+          <div class="two-column resume-layout">
+            <article class="surface">
+              <div class="segmented" role="tablist" aria-label="简历输入方式">
+                <button type="button" id="resumeModeTextTab" class="is-active" data-resume-mode="text"
+                        role="tab" aria-selected="true" aria-controls="resumeTextInput" tabindex="0">粘贴文本</button>
+                <button type="button" id="resumeModeFileTab" data-resume-mode="file"
+                        role="tab" aria-selected="false" aria-controls="resumeFileInputWrap" tabindex="-1">上传文件</button>
+              </div>
+              <form id="resumeAnalyzeForm">
+                <div id="resumeTextInput" role="tabpanel" aria-labelledby="resumeModeTextTab">
+                  <label class="field">
+                    <span>简历正文</span>
+                    <textarea id="resumeText" rows="17"
+                              placeholder="粘贴简历全文。建议包含教育背景、项目、实习、技术栈和真实成果…"></textarea>
+                  </label>
+                </div>
+                <div id="resumeFileInputWrap" role="tabpanel" aria-labelledby="resumeModeFileTab" hidden>
+                  <label class="drop-zone" id="resumeDropZone">
+                    <input type="file" id="resumeFile" accept=".txt,.md,.docx,.pdf">
+                    <span class="drop-icon" aria-hidden="true">↑</span>
+                    <strong>选择或拖入简历</strong>
+                    <small>TXT / Markdown / DOCX / PDF，最大 4 MB</small>
+                    <span id="resumeFileName">尚未选择文件</span>
+                  </label>
+                </div>
+                <button class="button button-primary button-block" type="submit" id="analyzeResumeButton">
+                  建立简历画像
+                </button>
+              </form>
+            </article>
+
+            <article class="surface resume-report" id="resumeReport">
+              <div class="report-placeholder" id="resumePlaceholder">
+                <div class="score-ring empty"><span>—</span></div>
+                <h3>等待分析</h3>
+                <p>分析后会显示结构化画像、证据完整度和可执行建议。</p>
+              </div>
+              <div id="resumeReportContent" hidden>
+                <div class="report-score-row">
+                  <div class="score-ring" id="resumeScoreRing"><span id="resumeScore">0</span></div>
+                  <div>
+                    <span class="eyebrow">EVIDENCE QUALITY</span>
+                    <h3 id="resumeName">候选人</h3>
+                    <p id="resumeLevel">待提升</p>
+                  </div>
+                </div>
+                <div class="report-tabs" role="tablist" aria-label="简历分析结果">
+                  <button type="button" id="reportSummaryTab" class="is-active" data-report-tab="summary"
+                          role="tab" aria-selected="true" aria-controls="reportSummaryPane" tabindex="0">浓缩画像</button>
+                  <button type="button" id="reportSkillsTab" data-report-tab="skills"
+                          role="tab" aria-selected="false" aria-controls="reportSkillsPane" tabindex="-1">技能证据</button>
+                  <button type="button" id="reportQualityTab" data-report-tab="quality"
+                          role="tab" aria-selected="false" aria-controls="reportQualityPane" tabindex="-1">质量拆解</button>
+                </div>
+                <div class="report-pane is-active" id="reportSummaryPane" data-report-pane="summary"
+                     role="tabpanel" aria-labelledby="reportSummaryTab">
+                  <pre id="resumeSummary"></pre>
+                  <div class="advice-list" id="resumeSuggestions"></div>
+                </div>
+                <div class="report-pane" id="reportSkillsPane" data-report-pane="skills"
+                     role="tabpanel" aria-labelledby="reportSkillsTab" hidden>
+                  <div class="chip-cloud" id="resumeSkills"></div>
+                  <div class="evidence-block">
+                    <h4>项目 / 经历证据</h4>
+                    <div id="resumeEvidence"></div>
+                  </div>
+                </div>
+                <div class="report-pane" id="reportQualityPane" data-report-pane="quality"
+                     role="tabpanel" aria-labelledby="reportQualityTab" hidden>
+                  <div class="dimension-list" id="resumeDimensions"></div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-jobs" data-panel-content="jobs">
+          <div class="page-intro">
+            <div>
+              <span class="eyebrow">JOB INBOX</span>
+              <h2>把散落的 JD 收进一个岗位池</h2>
+              <p>支持实时采集、演示验证和多岗位文本导入。雷达会从这里取数，不需要在模块间复制粘贴。</p>
+            </div>
+            <div class="pool-count"><strong id="jobPoolCount">0</strong><span>个岗位</span></div>
+          </div>
+
+          <div class="two-column jobs-input-grid">
+            <article class="surface">
+              <span class="eyebrow">COLLECT</span>
+              <h3>采集岗位</h3>
+              <form id="crawlJobsForm" class="compact-form">
+                <label class="field">
+                  <span>关键词</span>
+                  <input type="text" id="crawlKeyword" value="AI应用开发" required>
+                </label>
+                <div class="form-grid">
+                  <label class="field">
+                    <span>城市</span>
+                    <select id="crawlCity">
+                      <option>上海</option><option>北京</option><option>广州</option>
+                      <option>深圳</option><option>杭州</option><option>成都</option>
+                      <option>南京</option><option>武汉</option><option>西安</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>页数</span>
+                    <input type="number" id="crawlPages" min="1" max="5" value="1">
+                  </label>
+                </div>
+                <label class="checkbox-line">
+                  <input type="checkbox" id="crawlUseDemo">
+                  <span>使用明确标注的演示岗位（无需爬虫）</span>
+                </label>
+                <p class="form-note" id="crawlCapabilityText">正在检查实时采集能力…</p>
+                <button class="button button-primary button-block" type="submit" id="crawlJobsButton">开始采集</button>
+              </form>
+            </article>
+
+            <article class="surface">
+              <span class="eyebrow">IMPORT</span>
+              <h3>粘贴一个或多个 JD</h3>
+              <form id="importJobsForm" class="compact-form">
+                <label class="field">
+                  <span>岗位文本 <small>岗位之间空一行</small></span>
+                  <textarea id="jobImportText" rows="8" required
+                            placeholder="岗位名称：大模型应用开发&#10;公司名称：示例公司&#10;工作地点：上海&#10;岗位要求：Python、RAG、FastAPI…"></textarea>
+                </label>
+                <button class="button button-secondary button-block" type="submit" id="importJobsButton">导入岗位池</button>
+              </form>
+            </article>
+          </div>
+
+          <article class="surface">
+            <div class="surface-head">
+              <div><span class="eyebrow">CURRENT POOL</span><h3>当前岗位池</h3></div>
+              <button class="button button-accent button-compact" type="button" id="runFromPoolButton">用这批岗位跑雷达</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <caption class="sr-only">当前岗位池</caption>
+                <thead><tr><th scope="col">岗位 / 公司</th><th scope="col">地点</th><th scope="col">薪资</th><th scope="col">来源</th></tr></thead>
+                <tbody id="jobPoolBody"></tbody>
+              </table>
+              <div class="inline-empty" id="jobPoolEmpty">岗位池为空。可以粘贴 JD，或使用演示数据验证流程。</div>
+            </div>
+          </article>
+        </section>
+
+        <section class="panel" id="panel-workshop" data-panel-content="workshop">
+          <div class="page-intro">
+            <div>
+              <span class="eyebrow">TAILORED, NOT FABRICATED</span>
+              <h2>针对一个 JD，做一次有边界的改写</h2>
+              <p>只重组真实经历，不编造技能和数字。系统会同时给出关键词覆盖率与待核实缺口。</p>
+            </div>
+          </div>
+
+          <div class="two-column workshop-grid">
+            <article class="surface">
+              <form id="enhanceResumeForm">
+                <label class="field">
+                  <span>简历来源</span>
+                  <select id="enhanceResumeSource">
+                    <option value="latest">使用最新简历画像</option>
+                    <option value="paste">粘贴另一份简历</option>
+                  </select>
+                </label>
+                <label class="field" id="enhanceResumeTextField" hidden>
+                  <span>简历正文</span>
+                  <textarea id="enhanceResumeText" rows="8"></textarea>
+                </label>
+                <label class="field">
+                  <span>目标岗位 JD</span>
+                  <textarea id="enhanceJd" rows="12" required
+                            placeholder="粘贴目标岗位的职责、任职要求和加分项…"></textarea>
+                </label>
+                <label class="field">
+                  <span>输出风格</span>
+                  <select id="enhanceTemplate">
+                    <option value="standard">标准清晰</option>
+                    <option value="technical">技术证据优先</option>
+                    <option value="concise">一页精简</option>
+                  </select>
+                </label>
+                <label class="checkbox-line" id="aiConsentWrap">
+                  <input type="checkbox" id="aiProcessingConsent">
+                  <span>如服务端已启用 AI，允许将本次简历与 JD 发送至已配置模型处理</span>
+                </label>
+                <p class="form-note" id="enhanceModeNotice">正在确认本次优化是否会调用外部 AI 服务…</p>
+                <button class="button button-primary button-block" type="submit" id="enhanceResumeButton">生成定向版本</button>
+              </form>
+            </article>
+
+            <article class="surface workshop-output">
+              <div class="surface-head">
+                <div><span class="eyebrow">TARGETED VERSION</span><h3>定向版本</h3></div>
+                <button class="button button-secondary button-compact" type="button" id="copyEnhancedButton" disabled>复制</button>
+              </div>
+              <div class="coverage-row" id="coverageRow" hidden>
+                <div><strong id="coverageValue">0%</strong><span>关键词覆盖</span></div>
+                <div class="chip-cloud" id="enhanceKeywords"></div>
+              </div>
+              <pre class="output-document" id="enhancedResumeOutput">生成后的定向简历会显示在这里。</pre>
+              <div class="advice-list" id="enhanceRecommendations"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel" id="panel-applications" data-panel-content="applications">
+          <div class="page-intro">
+            <div>
+              <span class="eyebrow">APPLICATION CRM</span>
+              <h2>别让投递消失在浏览器历史里</h2>
+              <p>从推荐岗位一键建档，持续记录状态、备注和下一步，不再靠表格回忆。</p>
+            </div>
+            <button class="button button-primary" type="button" id="addApplicationButton">新增投递</button>
+          </div>
+
+          <div class="metric-grid application-metrics">
+            <article><span>全部</span><strong id="appTotal">0</strong></article>
+            <article><span>已投递</span><strong id="appSubmitted">0</strong></article>
+            <article><span>被查看</span><strong id="appViewed">0</strong></article>
+            <article><span>面试中</span><strong id="appInterviewing">0</strong></article>
+            <article class="positive"><span>已录用</span><strong id="appOffered">0</strong></article>
+            <article class="negative"><span>已拒绝</span><strong id="appRejected">0</strong></article>
+          </div>
+
+          <article class="surface">
+            <div class="application-toolbar">
+              <label class="search-field">
+                <span class="sr-only">搜索公司或岗位</span>
+                <input type="search" id="applicationQuery" placeholder="搜索公司或岗位">
+              </label>
+              <label>
+                <span class="sr-only">筛选状态</span>
+                <select id="applicationStatusFilter">
+                  <option value="">全部状态</option>
+                  <option value="submitted">已投递</option>
+                  <option value="viewed">被查看</option>
+                  <option value="interviewing">面试中</option>
+                  <option value="offered">已录用</option>
+                  <option value="rejected">已拒绝</option>
+                </select>
+              </label>
+              <button class="button button-secondary button-compact" type="button" id="filterApplicationsButton">筛选</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <caption class="sr-only">投递记录</caption>
+                <thead><tr><th scope="col">公司 / 岗位</th><th scope="col">投递日期</th><th scope="col">状态</th><th scope="col">备注</th><th scope="col">操作</th></tr></thead>
+                <tbody id="applicationsBody"></tbody>
+              </table>
+              <div class="inline-empty" id="applicationsEmpty">暂无投递记录。从今日推荐中添加，或者手动新增。</div>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="applicationDialog" class="modal" aria-labelledby="applicationDialogTitle">
+    <form method="dialog" class="modal-shell" id="applicationForm">
+      <div class="modal-head">
+        <div><span class="eyebrow">APPLICATION</span><h2 id="applicationDialogTitle">新增投递</h2></div>
+        <button class="icon-button close-button" type="button" data-close-dialog aria-label="关闭">×</button>
+      </div>
+      <input type="hidden" id="applicationId">
+      <input type="hidden" id="applicationJobDescription">
+      <div class="form-grid">
+        <label class="field">
+          <span>公司名称</span>
+          <input type="text" id="applicationCompany" maxlength="100" required>
+        </label>
+        <label class="field">
+          <span>岗位名称</span>
+          <input type="text" id="applicationTitle" maxlength="100" required>
+        </label>
+      </div>
+      <div class="form-grid">
+        <label class="field">
+          <span>状态</span>
+          <select id="applicationStatus">
+            <option value="submitted">已投递</option>
+            <option value="viewed">被查看</option>
+            <option value="interviewing">面试中</option>
+            <option value="offered">已录用</option>
+            <option value="rejected">已拒绝</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>投递日期</span>
+          <input type="date" id="applicationDate">
+        </label>
+      </div>
+      <div class="form-grid">
+        <label class="field">
+          <span>地点</span>
+          <input type="text" id="applicationLocation" maxlength="60">
+        </label>
+        <label class="field">
+          <span>薪资</span>
+          <input type="text" id="applicationSalary" maxlength="60">
+        </label>
+      </div>
+      <label class="field">
+        <span>备注 / 下一步</span>
+        <textarea id="applicationNotes" rows="4" maxlength="2000" placeholder="例如：周五前完成笔试；下轮重点准备 RAG 评估…"></textarea>
+      </label>
+      <div class="modal-actions">
+        <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+        <button class="button button-primary" type="submit" id="saveApplicationButton">保存记录</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+  <div class="mobile-overlay" id="mobileOverlay" hidden></div>
+</body>
+</html>

@@ -1,0 +1,14 @@
+.git
+.private
+.env
+.env.*
+.venv
+__pycache__
+*.pyc
+*.egg-info
+data/*.db*
+tests
+qdrant_resume_db
+debug_page.html
+dist
+build
