@@ -27,7 +27,33 @@ def test_scheduler_is_idempotent_per_day(tmp_path: Path) -> None:
     assert scheduler.tick(before_schedule) is False
     assert scheduler.tick(after_schedule) is True
     assert scheduler.tick(after_schedule) is False
-    assert len(service.repository.list_radar_runs()) == 1
+    jobs = service.repository.list_operation_jobs(job_type="radar_run")
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "queued"
+
+
+def test_scheduler_hashes_timezone_names_with_header_unsafe_characters(
+    tmp_path: Path,
+) -> None:
+    service = CareerService(make_settings(tmp_path))
+    service.analyse_resume({"text": SAMPLE_RESUME})
+    service.update_radar_settings(
+        {
+            "enabled": True,
+            "schedule_time": "09:00",
+            "sources": ["demo"],
+            "min_score": 0,
+        }
+    )
+    timezone_name = "Etc/GMT+8"
+    scheduler = RadarScheduler(service, timezone_name)
+    now = datetime(2026, 7, 29, 9, 1, tzinfo=ZoneInfo(timezone_name))
+
+    assert scheduler.tick(now) is True
+    assert scheduler.tick(now) is False
+    jobs = service.repository.list_operation_jobs(job_type="radar_run")
+    assert len(jobs) == 1
+    assert "+" not in jobs[0]["idempotency_key"]
 
 
 def test_scheduler_checks_immediately_when_started(tmp_path: Path) -> None:

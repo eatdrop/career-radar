@@ -4,6 +4,10 @@
 
 const API_BASE = "/api/v1";
 const MAX_RESUME_FILE_BYTES = 4 * 1024 * 1024;
+const RADAR_RUN_STORAGE_KEY = "career-radar.active-run.v1";
+const RADAR_POLL_TIMEOUT_MS = 3 * 60 * 1000;
+const RADAR_TERMINAL_STATUSES = new Set(["succeeded", "failed"]);
+const RADAR_ACTIVE_STATUSES = new Set(["queued", "running", "retrying"]);
 const MOBILE_NAV_QUERY = window.matchMedia("(max-width: 900px)");
 const REDUCED_MOTION_QUERY = window.matchMedia("(prefers-reduced-motion: reduce)");
 const PANEL_META = {
@@ -31,6 +35,8 @@ const state = {
   resumeFile: null,
   resumeResult: null,
   radarRunning: false,
+  radarRunStatus: null,
+  radarActiveButtonId: null,
   currentPanel: "radar",
 };
 
@@ -92,6 +98,11 @@ async function apiRequest(path, options = {}) {
     init.headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(options.body);
   }
+  if (options.headers) {
+    Object.keys(options.headers).forEach((name) => {
+      init.headers[name] = options.headers[name];
+    });
+  }
   try {
     const response = await fetch(`${API_BASE}${path}`, init);
     const contentType = response.headers.get("content-type") || "";
@@ -102,8 +113,13 @@ async function apiRequest(path, options = {}) {
     if (!response.ok || !payload.success) {
       const error = new Error(payload?.error?.message || `请求失败（HTTP ${response.status}）`);
       error.code = payload?.error?.code || "request_failed";
+      error.status = response.status;
       error.requestId = payload?.meta?.request_id || "";
       error.details = payload?.error?.details || {};
+      const retryAfter = Number(response.headers.get("Retry-After"));
+      error.retryAfter = Number.isFinite(retryAfter)
+        ? Math.max(1, Math.min(60, retryAfter))
+        : 0;
       throw error;
     }
     return payload.data;
@@ -460,48 +476,316 @@ function renderRunHistory(runs) {
   });
 }
 
+function createRadarIdempotencyKey() {
+  let randomPart = "";
+  if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+    const values = new Uint32Array(4);
+    window.crypto.getRandomValues(values);
+    randomPart = Array.from(values, (value) => value.toString(36)).join("");
+  } else {
+    randomPart = `${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+  }
+  return `radar-${Date.now().toString(36)}-${randomPart}`.slice(0, 128);
+}
+
+function isValidIdempotencyKey(value) {
+  return typeof value === "string" && value.length >= 8 && value.length <= 128
+    && /^[A-Za-z0-9._:~/-]+$/.test(value);
+}
+
+function readStoredRadarRun() {
+  try {
+    const value = window.sessionStorage.getItem(RADAR_RUN_STORAGE_KEY);
+    if (!value) return null;
+    const record = JSON.parse(value);
+    if (!record || !isValidIdempotencyKey(record.idempotency_key)) {
+      window.sessionStorage.removeItem(RADAR_RUN_STORAGE_KEY);
+      return null;
+    }
+    if (!record.body || typeof record.body !== "object" || Array.isArray(record.body)) record.body = {};
+    record.submitted_at = Number(record.submitted_at) || Date.now();
+    record.deadline_at = Number(record.deadline_at) || record.submitted_at + RADAR_POLL_TIMEOUT_MS;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+function storeRadarRun(record) {
+  try {
+    window.sessionStorage.setItem(RADAR_RUN_STORAGE_KEY, JSON.stringify(record));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearStoredRadarRun(record = null) {
+  try {
+    if (record) {
+      const current = readStoredRadarRun();
+      if (current && current.idempotency_key !== record.idempotency_key) return;
+    }
+    window.sessionStorage.removeItem(RADAR_RUN_STORAGE_KEY);
+  } catch {
+    // The task can still finish when storage is disabled by the browser.
+  }
+}
+
+function radarStatusPath(record) {
+  const id = String(record.id || "");
+  if (!id) throw new Error("任务缺少标识，无法查询运行状态。");
+  const expectedPath = `${API_BASE}/radar/runs/${encodeURIComponent(id)}`;
+  const raw = String(record.status_url || "");
+  if (raw) {
+    try {
+      const url = new URL(raw, window.location.origin);
+      if (url.origin === window.location.origin && url.pathname === expectedPath && !url.search) {
+        return url.pathname.slice(API_BASE.length);
+      }
+    } catch {
+      // Fall back to the canonical same-origin path below.
+    }
+  }
+  return expectedPath.slice(API_BASE.length);
+}
+
+function radarTaskDigest(task) {
+  if (task?.result?.summary) return task.result;
+  if (task?.result?.digest?.summary) return task.result.digest;
+  return null;
+}
+
+function radarTaskFailure(task) {
+  const taskError = task?.error;
+  const message = typeof taskError === "string"
+    ? taskError
+    : taskError?.message || "雷达任务执行失败，请检查岗位来源与简历状态后重试。";
+  const error = new Error(message);
+  error.code = typeof taskError === "object" && taskError?.code ? taskError.code : "radar_run_failed";
+  return error;
+}
+
+function radarPollDelay(index) {
+  if (index === 0) return 1000;
+  if (index === 1) return 2000;
+  return 5000;
+}
+
+function waitFor(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function setRadarTaskVisual(task) {
+  const status = RADAR_ACTIVE_STATUSES.has(task?.status) ? task.status : "queued";
+  state.radarRunStatus = status;
+  const labels = {
+    queued: "排队中",
+    running: "运行中",
+    retrying: task?.attempts && task?.max_attempts
+      ? `重试中 ${task.attempts}/${task.max_attempts}`
+      : "重试中",
+  };
+  byId("radarRunState").textContent = labels[status];
+  syncRadarRunButtons();
+}
+
+function radarButtonLabelTarget(button) {
+  return button.id === "runRadarButton" ? button.querySelector("span") || button : button;
+}
+
 function syncRadarRunButtons(activeButton = null) {
+  if (activeButton) state.radarActiveButtonId = activeButton.id;
+  const activeId = state.radarActiveButtonId || "runRadarButton";
+  const runningLabel = {
+    queued: "任务排队中…",
+    running: "正在匹配…",
+    retrying: "任务重试中…",
+  }[state.radarRunStatus] || "处理中…";
   ["runRadarButton", "topRunRadarButton", "runFromPoolButton"].forEach((id) => {
     const button = byId(id);
-    const isActive = state.radarRunning && button === activeButton;
+    const label = radarButtonLabelTarget(button);
+    if (!label.dataset.idleLabel) label.dataset.idleLabel = label.textContent;
+    label.textContent = state.radarRunning ? runningLabel : label.dataset.idleLabel;
+    const isActive = state.radarRunning && id === activeId;
     button.classList.toggle("is-loading", isActive);
     button.disabled = state.radarRunning || (id === "runFromPoolButton" && state.jobPool.length === 0);
-    if (isActive) button.setAttribute("aria-busy", "true");
+    if (state.radarRunning) button.setAttribute("aria-busy", "true");
     else button.removeAttribute("aria-busy");
   });
 }
 
-async function runRadar(options = {}) {
-  if (state.radarRunning) return;
-  const button = options.button || byId("runRadarButton");
-  const useDemo = options.useDemo ?? byId("radarUseDemo").checked;
+async function submitRadarRun(record) {
+  const task = await apiRequest("/radar/runs", {
+    method: "POST",
+    body: record.body,
+    headers: { "Idempotency-Key": record.idempotency_key },
+    timeout: 30000,
+  });
+  if (!task?.id || !RADAR_ACTIVE_STATUSES.has(task.status) && !RADAR_TERMINAL_STATUSES.has(task.status)) {
+    const error = new Error("服务返回了无法识别的任务状态，请稍后重试。");
+    error.code = "invalid_task_response";
+    throw error;
+  }
+  record.id = task.id;
+  record.status_url = task.status_url || `${API_BASE}/radar/runs/${encodeURIComponent(task.id)}`;
+  record.status = task.status;
+  storeRadarRun(record);
+  return task;
+}
+
+async function pollRadarRun(record, initialTask = null) {
+  let task = initialTask;
+  let pollIndex = 0;
+  while (true) {
+    if (task) {
+      if (String(task.id) !== String(record.id)) {
+        const error = new Error("任务状态与提交记录不一致，已停止自动查询。");
+        error.code = "task_identity_mismatch";
+        throw error;
+      }
+      if (!RADAR_ACTIVE_STATUSES.has(task.status) && !RADAR_TERMINAL_STATUSES.has(task.status)) {
+        const error = new Error("服务返回了未知任务状态，请稍后重试。");
+        error.code = "invalid_task_status";
+        throw error;
+      }
+      record.status = task.status;
+      storeRadarRun(record);
+      if (task.status === "succeeded") return task;
+      if (task.status === "failed") throw radarTaskFailure(task);
+      setRadarTaskVisual(task);
+    }
+
+    if (Date.now() >= record.deadline_at) {
+      const error = new Error("任务仍在后台处理，页面已停止自动查询；再次点击运行可继续查看同一任务。");
+      error.code = "radar_poll_timeout";
+      error.keepRadarRecord = true;
+      throw error;
+    }
+
+    const delay = task || pollIndex > 0 ? radarPollDelay(pollIndex) : 0;
+    if (delay) await waitFor(Math.min(delay, Math.max(0, record.deadline_at - Date.now())));
+    if (Date.now() >= record.deadline_at) continue;
+    pollIndex += 1;
+    try {
+      task = await apiRequest(radarStatusPath(record), { timeout: 15000 });
+    } catch (error) {
+      if (error.status === 408 || error.status === 429) {
+        state.radarRunStatus = "retrying";
+        byId("radarRunState").textContent = error.status === 429 ? "限流等待中" : "连接重试中";
+        syncRadarRunButtons();
+        if (error.retryAfter) {
+          await waitFor(
+            Math.min(error.retryAfter * 1000, Math.max(0, record.deadline_at - Date.now())),
+          );
+        }
+        task = null;
+        continue;
+      }
+      if (error.status && error.status < 500) throw error;
+      task = null;
+      state.radarRunStatus = "retrying";
+      byId("radarRunState").textContent = "连接重试中";
+      syncRadarRunButtons();
+    }
+  }
+}
+
+async function completeRadarRun(task, record, resumed) {
+  clearStoredRadarRun(record);
+  const returnedDigest = radarTaskDigest(task);
+  if (returnedDigest) renderRadarDigest(returnedDigest);
+  const refreshResults = await Promise.allSettled([loadRadar(), loadDashboard()]);
+  const digest = returnedDigest || state.radar?.latest;
+  switchPanel("radar");
+  if (digest?.summary) {
+    const prefix = resumed ? "已恢复并完成" : "雷达完成";
+    showToast(
+      `${prefix}：从 ${digest.summary.collected} 个岗位中推荐 ${digest.summary.shortlisted} 个。`,
+    );
+  } else {
+    showToast("雷达任务已完成，最新结果正在同步。");
+  }
+  warnIfRefreshFailed(refreshResults);
+}
+
+async function continueRadarRun(record, options = {}) {
   state.radarRunning = true;
-  syncRadarRunButtons(button);
-  byId("radarRunState").textContent = "运行中";
+  state.radarRunStatus = record.status && RADAR_ACTIVE_STATUSES.has(record.status)
+    ? record.status
+    : "queued";
+  state.radarActiveButtonId = options.button?.id || state.radarActiveButtonId || "runRadarButton";
+  syncRadarRunButtons(options.button);
+  setRadarTaskVisual({ status: state.radarRunStatus });
   try {
-    const body = options.sources
-      ? { sources: options.sources }
-      : useDemo
-        ? { sources: ["demo"] }
-        : {};
-    const digest = await apiRequest("/radar/run", {
-      method: "POST",
-      body,
-      timeout: 120000,
-    });
-    renderRadarDigest(digest);
-    const refreshResults = await Promise.allSettled([loadRadar(), loadDashboard()]);
-    switchPanel("radar");
-    showToast(`雷达完成：从 ${digest.summary.collected} 个岗位中推荐 ${digest.summary.shortlisted} 个。`);
-    warnIfRefreshFailed(refreshResults);
+    const initialTask = record.id ? null : await submitRadarRun(record);
+    const task = await pollRadarRun(record, initialTask);
+    await completeRadarRun(task, record, Boolean(options.resumed));
   } catch (error) {
-    byId("radarRunState").textContent = "运行失败";
-    showToast(errorMessage(error), "error", 6500);
+    const serviceUnavailableByConfiguration = error.code === "background_workers_disabled";
+    const ambiguousSubmission = !record.id
+      && !serviceUnavailableByConfiguration
+      && (
+        !error.status
+        || error.status >= 500
+        || error.status === 408
+        || error.status === 429
+        || error.code === "timeout"
+      );
+    const keepRecord = Boolean(error.keepRadarRecord || ambiguousSubmission);
+    if (!keepRecord) clearStoredRadarRun(record);
+    byId("radarRunState").textContent = keepRecord ? "后台处理中" : "运行失败";
+    const message = ambiguousSubmission
+      ? "提交结果暂时无法确认；幂等记录已保留，刷新页面会继续恢复同一任务。"
+      : errorMessage(error);
+    showToast(message, keepRecord ? "warning" : "error", 7000);
     if (error.code === "resume_unavailable") switchPanel("resume");
   } finally {
     state.radarRunning = false;
+    state.radarRunStatus = null;
+    state.radarActiveButtonId = null;
     syncRadarRunButtons();
   }
+}
+
+async function runRadar(options = {}) {
+  if (state.radarRunning) return;
+  const stored = readStoredRadarRun();
+  if (stored) {
+    stored.deadline_at = Date.now() + RADAR_POLL_TIMEOUT_MS;
+    storeRadarRun(stored);
+    await continueRadarRun(stored, { button: options.button, resumed: true });
+    return;
+  }
+  const useDemo = options.useDemo ?? byId("radarUseDemo").checked;
+  const body = options.sources
+    ? { sources: options.sources }
+    : useDemo
+      ? { sources: ["demo"] }
+      : {};
+  const now = Date.now();
+  const record = {
+    idempotency_key: createRadarIdempotencyKey(),
+    body,
+    status: "queued",
+    submitted_at: now,
+    deadline_at: now + RADAR_POLL_TIMEOUT_MS,
+  };
+  if (!storeRadarRun(record)) {
+    showToast("浏览器未开放会话存储；本次任务可运行，但刷新后无法自动恢复。", "warning", 6500);
+  }
+  await continueRadarRun(record, { button: options.button });
+}
+
+function resumeStoredRadarRun() {
+  const record = readStoredRadarRun();
+  if (!record || state.radarRunning) return;
+  record.deadline_at = Date.now() + RADAR_POLL_TIMEOUT_MS;
+  storeRadarRun(record);
+  showToast("检测到未完成的雷达任务，正在恢复进度。");
+  continueRadarRun(record, { resumed: true }).catch(() => {
+    // continueRadarRun reports operational failures and always restores button state.
+  });
 }
 
 async function saveRadarSettings(event) {
@@ -1109,6 +1393,7 @@ async function initialise() {
   setReportTab("summary");
   syncRadarRunButtons();
   switchPanel(location.hash.slice(1) || "radar", false);
+  resumeStoredRadarRun();
   const healthTask = loadHealth().catch((error) => {
     renderHealthFailure();
     showToast(errorMessage(error), "error", 6500);

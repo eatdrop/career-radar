@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from datetime import datetime
@@ -13,12 +14,7 @@ LOGGER = logging.getLogger("jobsearch.scheduler")
 
 
 class RadarScheduler:
-    """Runs at most once per local calendar day.
-
-    The scheduler is intentionally single-process. For replicated deployments,
-    disable it with ``SCHEDULER_ENABLED=false`` and call the radar endpoint from
-    an external scheduler that provides distributed locking.
-    """
+    """Durably enqueue at most one radar operation per local calendar day."""
 
     def __init__(self, service: CareerService, timezone_name: str):
         self.service = service
@@ -34,6 +30,10 @@ class RadarScheduler:
             target=self._loop, name="career-radar-scheduler", daemon=True
         )
         self._thread.start()
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
     def stop(self) -> None:
         self._stop.set()
@@ -73,20 +73,22 @@ class RadarScheduler:
             return False
 
         today = current.date().isoformat()
-        last_attempt = self.service.repository.get_state("radar_last_scheduled_date", "")
-        if last_attempt == today:
-            return False
-        # Claim before executing so a slow or failing provider does not cause a
-        # retry storm every 20 seconds.
-        self.service.repository.set_state("radar_last_scheduled_date", today)
+        timezone_token = hashlib.sha256(self.timezone_name.encode("utf-8")).hexdigest()[:16]
+        idempotency_key = f"scheduled:{timezone_token}:{today}"
         try:
-            self.service.run_radar(trigger_type="scheduled")
-            LOGGER.info("scheduled radar completed date=%s", today)
-        except AppError as exc:
-            LOGGER.warning("scheduled radar failed date=%s code=%s", today, exc.code)
-            if exc.code == "radar_already_running":
-                # A manual run won the in-process lock. Retry on the next tick
-                # instead of silently losing today's scheduled run.
-                self.service.repository.set_state("radar_last_scheduled_date", "")
+            operation = self.service.enqueue_radar_operation(
+                {},
+                idempotency_key=idempotency_key,
+                trigger_type="scheduled",
+            )
+            if operation["deduplicated"]:
                 return False
+            LOGGER.info(
+                "scheduled radar enqueued date=%s operation_id=%s",
+                today,
+                operation["id"],
+            )
+        except AppError as exc:
+            LOGGER.warning("scheduled radar enqueue failed date=%s code=%s", today, exc.code)
+            return False
         return True

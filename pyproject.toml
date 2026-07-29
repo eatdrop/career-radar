@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jobsearch-ai-assistant"
-version = "1.0.0"
+version = "1.1.0"
 description = "智职引擎：面向大学生的每日求职雷达与投递闭环"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -55,6 +55,7 @@ dev = [
 [project.scripts]
 jobsearch-web = "jobsearch_mcp_server.webapp:main"
 jobsearch-mcp-server = "jobsearch_mcp_server.server:main"
+jobsearch-ops = "jobsearch_mcp_server.ops:main"
 
 [project.urls]
 Repository = "https://github.com/eatdrop/career-radar"

@@ -1,6 +1,8 @@
 include LICENSE
 include README.md
 include CHANGELOG.md
+include SECURITY.md
+include .github/RELEASE_CHECKLIST.md
 include web_server.py
 include .env.example
 include Dockerfile

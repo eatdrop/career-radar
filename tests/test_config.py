@@ -2,13 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from jobsearch_mcp_server.config import Settings, _env_bool
+from jobsearch_mcp_server.config import Settings, _allowed_hosts, _env_bool
 
 
 @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
-def test_env_bool_accepts_explicit_true_values(
-    monkeypatch: pytest.MonkeyPatch, value: str
-) -> None:
+def test_env_bool_accepts_explicit_true_values(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("TEST_BOOLEAN", value)
 
     assert _env_bool("TEST_BOOLEAN", False) is True
@@ -40,3 +38,15 @@ def test_settings_load_dotenv_from_working_directory(
     settings = Settings.from_env()
 
     assert settings.port == 4317
+
+
+def test_allowed_hosts_accepts_local_hosts_and_rejects_ambiguous_entries() -> None:
+    assert _allowed_hosts("127.0.0.1,localhost,[::1],LOCALHOST.") == (
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    )
+
+    for value in ("localhost:3000", "*.example.com", "example.com/path", ""):
+        with pytest.raises(ValueError, match="ALLOWED_HOSTS"):
+            _allowed_hosts(value)

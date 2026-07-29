@@ -1,5 +1,6 @@
 import base64
 import json
+import smtplib
 import ssl
 import zipfile
 from io import BytesIO
@@ -14,6 +15,7 @@ from jobsearch_mcp_server.services import (
     AppError,
     CareerService,
 )
+from jobsearch_mcp_server.worker import DeliveryUnknownError, RetryWithoutAttemptError
 from tests.helpers import SAMPLE_RESUME, make_settings
 
 
@@ -145,13 +147,24 @@ def test_radar_payload_boolean_and_sources_are_strict(tmp_path: Path) -> None:
 def test_privacy_mode_keeps_redacted_evidence_without_raw_contacts(tmp_path: Path) -> None:
     settings = make_settings(tmp_path).with_overrides(store_raw_resume=False)
     service = CareerService(settings)
-    service.analyse_resume({"text": SAMPLE_RESUME})
+    private_resume = (
+        SAMPLE_RESUME
+        + "\n项目联系人：project-owner@example.com，国际电话：+1 (415) 555-2671"
+        + "\n主页：https://linkedin.com/in/private-student"
+        + "\n微信号：private_wechat"
+    )
+    service.analyse_resume({"text": private_resume})
 
     stored = service.repository.get_latest_resume()
     assert stored is not None
     assert stored["raw_text"] == ""
     assert stored["structured"]["basic_info"]["email"] == ""
     assert stored["structured"]["basic_info"]["phone"] == ""
+    persisted_profile = json.dumps(stored, ensure_ascii=False)
+    assert "project-owner@example.com" not in persisted_profile
+    assert "415" not in persisted_profile
+    assert "private-student" not in persisted_profile
+    assert "private_wechat" not in persisted_profile
 
     evidence = service.repository.get_resume_evidence_text(stored["id"])
     assert evidence
@@ -162,9 +175,7 @@ def test_privacy_mode_keeps_redacted_evidence_without_raw_contacts(tmp_path: Pat
 
     service.update_radar_settings({"sources": ["demo"], "min_score": 0})
     digest = service.run_radar()
-    persisted = json.dumps(
-        service.repository.get_state("latest_radar"), ensure_ascii=False
-    )
+    persisted = json.dumps(service.repository.get_state("latest_radar"), ensure_ascii=False)
     assert digest["summary"]["shortlisted"] == 3
     assert "student@example.com" not in persisted
     assert "13800138000" not in persisted
@@ -247,6 +258,22 @@ def test_radar_rejects_a_second_in_process_run(tmp_path: Path) -> None:
     assert service.repository.list_radar_runs() == []
 
 
+def test_async_radar_lock_contention_requests_budget_free_defer(tmp_path: Path) -> None:
+    service = CareerService(make_settings(tmp_path))
+    accepted = service.enqueue_radar_operation(
+        {"sources": ["demo"]},
+        idempotency_key="locked-radar-operation",
+    )
+    stored_job = service.repository.get_operation_job(int(accepted["id"]))
+    assert stored_job is not None
+    assert service._radar_lock.acquire(blocking=False)
+    try:
+        with pytest.raises(RetryWithoutAttemptError):
+            service.execute_radar_operation(stored_job["payload"])
+    finally:
+        service._radar_lock.release()
+
+
 def test_latest_resume_uses_rowid_as_timestamp_tiebreaker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -313,6 +340,239 @@ def test_smtp_starttls_uses_verified_context(
     assert len(contexts) == 1
     assert contexts[0].check_hostname is True
     assert contexts[0].verify_mode == ssl.CERT_REQUIRED
+
+
+def test_scheduled_radar_commits_email_outbox_and_hydrates_delivery(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path).with_overrides(
+        smtp_host="smtp.example.com",
+        smtp_user="sender@example.com",
+        smtp_password="secret",
+        smtp_from="sender@example.com",
+    )
+    service = CareerService(settings)
+    service.analyse_resume({"text": SAMPLE_RESUME})
+    service.update_radar_settings(
+        {
+            "sources": ["demo"],
+            "min_score": 0,
+            "email_enabled": True,
+            "email_to": "student@example.com",
+        }
+    )
+
+    digest = service.run_radar(
+        trigger_type="scheduled",
+        email_idempotency_key="radar-email:scheduled-test",
+    )
+
+    assert digest["email_delivery"]["status"] == "pending"
+    message_id = digest["email_delivery"]["message_id"]
+    message = service.repository.get_outbox_message(message_id)
+    assert message is not None
+    assert message["payload"]["summary"] == digest["summary"]
+    assert message["payload"]["items"]
+    assert "resume_evidence" not in message["payload"]["items"][0]
+    assert set(message["payload"]["items"][0]) == {
+        "title",
+        "score",
+        "company",
+        "location",
+        "salary",
+        "why_fit",
+        "resume_tips",
+        "url",
+    }
+    claimed = service.repository.claim_outbox_message(worker_id="test-mailer")
+    assert claimed is not None
+    service.repository.complete_outbox_message(message_id, claimed["claim_token"])
+    assert service.radar_overview()["latest"]["email_delivery"]["status"] == "sent"
+
+
+def test_reclaimed_operation_reuses_completed_radar_result(tmp_path: Path) -> None:
+    service = CareerService(make_settings(tmp_path))
+    service.analyse_resume({"text": SAMPLE_RESUME})
+    accepted = service.enqueue_radar_operation(
+        {"sources": ["demo"]},
+        idempotency_key="restart-safe-radar",
+    )
+    stored_job = service.repository.get_operation_job(int(accepted["id"]))
+    assert stored_job is not None
+
+    first = service.execute_radar_operation(stored_job["payload"])
+    second = service.execute_radar_operation(stored_job["payload"])
+
+    assert second == first
+    assert first["run_id"].startswith("operation-")
+    assert len(service.repository.list_radar_runs()) == 1
+
+
+@pytest.mark.parametrize("prior_status", ["running", "failed"])
+def test_reclaimed_operation_resumes_a_noncompleted_radar_run(
+    tmp_path: Path,
+    prior_status: str,
+) -> None:
+    service = CareerService(make_settings(tmp_path))
+    service.analyse_resume({"text": SAMPLE_RESUME})
+    accepted = service.enqueue_radar_operation(
+        {"sources": ["demo"]},
+        idempotency_key=f"recover-{prior_status}-radar",
+    )
+    stored_job = service.repository.get_operation_job(int(accepted["id"]))
+    assert stored_job is not None
+    run_id = stored_job["payload"]["radar_run_id"]
+    service.repository.create_radar_run(run_id, "manual")
+    if prior_status == "failed":
+        service.repository.finish_radar_run(
+            run_id,
+            status="failed",
+            error_message="interrupted",
+        )
+
+    result = service.execute_radar_operation(stored_job["payload"])
+
+    stored_run = service.repository.get_radar_run(run_id)
+    assert result["summary"]["shortlisted"] > 0
+    assert stored_run is not None
+    assert stored_run["status"] == "completed"
+    assert len([item for item in service.repository.list_radar_runs() if item["id"] == run_id]) == 1
+
+
+def test_manual_and_scheduled_operations_have_distinct_run_identity(
+    tmp_path: Path,
+) -> None:
+    service = CareerService(make_settings(tmp_path))
+    shared_key = "scheduled:Asia/Shanghai:2026-07-29"
+    manual = service.enqueue_radar_operation(
+        {"sources": ["demo"]},
+        idempotency_key=shared_key,
+        trigger_type="manual",
+    )
+    scheduled = service.enqueue_radar_operation(
+        {"sources": ["demo"]},
+        idempotency_key=shared_key,
+        trigger_type="scheduled",
+    )
+    manual_job = service.repository.get_operation_job(int(manual["id"]))
+    scheduled_job = service.repository.get_operation_job(int(scheduled["id"]))
+
+    assert manual_job is not None
+    assert scheduled_job is not None
+    assert manual_job["payload"]["radar_run_id"] != scheduled_job["payload"]["radar_run_id"]
+
+
+@pytest.mark.parametrize(
+    "delivery_error",
+    [
+        smtplib.SMTPServerDisconnected("connection closed"),
+        TimeoutError("acknowledgement timeout"),
+    ],
+)
+def test_ambiguous_smtp_transport_failure_is_quarantined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    delivery_error: Exception,
+) -> None:
+    class DisconnectingSMTP:
+        def __init__(self, *_args: object, **_kwargs: object):
+            pass
+
+        def __enter__(self) -> "DisconnectingSMTP":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def starttls(self, **_kwargs: object) -> None:
+            pass
+
+        def login(self, *_args: object) -> None:
+            pass
+
+        def send_message(self, _message: object) -> None:
+            raise delivery_error
+
+    monkeypatch.setattr(
+        "jobsearch_mcp_server.services.smtplib.SMTP",
+        DisconnectingSMTP,
+    )
+    service = CareerService(
+        make_settings(tmp_path).with_overrides(
+            smtp_host="smtp.example.com",
+            smtp_user="sender@example.com",
+            smtp_password="secret",
+            smtp_from="sender@example.com",
+        )
+    )
+    message = {
+        "id": 42,
+        "recipient": "student@example.com",
+        "payload": {
+            "items": [],
+            "summary": {"collected": 0, "after_filter": 0, "shortlisted": 0},
+        },
+    }
+
+    with pytest.raises(DeliveryUnknownError):
+        service.send_outbox_message(message)
+
+
+def test_email_digest_rejects_non_http_job_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent_messages: list[str] = []
+
+    class CapturingSMTP:
+        def __init__(self, *_args: object, **_kwargs: object):
+            pass
+
+        def __enter__(self) -> "CapturingSMTP":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def starttls(self, **_kwargs: object) -> None:
+            pass
+
+        def login(self, *_args: object) -> None:
+            pass
+
+        def send_message(self, message: object) -> None:
+            sent_messages.append(str(message))
+
+    monkeypatch.setattr("jobsearch_mcp_server.services.smtplib.SMTP", CapturingSMTP)
+    service = CareerService(
+        make_settings(tmp_path).with_overrides(
+            smtp_host="smtp.example.com",
+            smtp_user="sender@example.com",
+            smtp_password="secret",
+            smtp_from="sender@example.com",
+        )
+    )
+    service._send_digest_email(
+        "student@example.com",
+        {
+            "summary": {"collected": 1, "after_filter": 1, "shortlisted": 1},
+            "items": [
+                {
+                    "title": "Python 实习生",
+                    "score": 90,
+                    "company": "示例公司",
+                    "location": "上海",
+                    "salary": "面议",
+                    "why_fit": "技能匹配",
+                    "resume_tips": ["突出 Python"],
+                    "url": "javascript:alert(1)",
+                }
+            ],
+        },
+    )
+
+    assert len(sent_messages) == 1
+    assert "javascript:" not in sent_messages[0].lower()
 
 
 def test_resume_enhancement_requires_explicit_ai_consent(

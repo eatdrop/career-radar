@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, replace
+from ipaddress import ip_address
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -60,9 +62,7 @@ def _env_bool(name: str, default: bool) -> bool:
         return True
     if normalised in {"0", "false", "no", "off"}:
         return False
-    raise ValueError(
-        f"{name} must be one of: 1/0, true/false, yes/no, on/off"
-    )
+    raise ValueError(f"{name} must be one of: 1/0, true/false, yes/no, on/off")
 
 
 def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -71,6 +71,33 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     except ValueError:
         return default
     return max(minimum, min(maximum, value))
+
+
+def _allowed_hosts(value: str) -> tuple[str, ...]:
+    hosts: list[str] = []
+    for raw_host in value.split(","):
+        raw_host = raw_host.strip()
+        if not raw_host:
+            continue
+        candidate = (
+            raw_host[1:-1] if raw_host.startswith("[") and raw_host.endswith("]") else raw_host
+        )
+        candidate = candidate.lower().rstrip(".")
+        try:
+            ip_address(candidate)
+        except ValueError:
+            if not re.fullmatch(
+                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+                r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                candidate,
+            ):
+                raise ValueError(
+                    "ALLOWED_HOSTS entries must be hostnames or IP addresses without ports"
+                ) from None
+        hosts.append(candidate)
+    if not hosts:
+        raise ValueError("ALLOWED_HOSTS must contain at least one host")
+    return tuple(dict.fromkeys(hosts))
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +111,7 @@ class Settings:
     max_body_bytes: int
     rate_limit_per_minute: int
     max_concurrent_requests: int
+    allowed_hosts: tuple[str, ...]
     allowed_origins: tuple[str, ...]
     log_level: str
     demo_enabled: bool
@@ -94,6 +122,9 @@ class Settings:
     ai_timeout_seconds: int
     serpapi_key: str
     scheduler_enabled: bool
+    background_workers_enabled: bool
+    worker_poll_seconds: int
+    worker_lease_seconds: int
     timezone: str
     smtp_host: str
     smtp_port: int
@@ -110,6 +141,12 @@ class Settings:
             for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
             if origin.strip()
         )
+        allowed_hosts = _allowed_hosts(
+            os.getenv(
+                "ALLOWED_HOSTS",
+                "127.0.0.1,localhost,::1",
+            )
+        )
         return cls(
             host=os.getenv("APP_HOST", "127.0.0.1"),
             port=_env_int("APP_PORT", 3000, 0, 65535),
@@ -120,6 +157,7 @@ class Settings:
             ),
             rate_limit_per_minute=_env_int("RATE_LIMIT_PER_MINUTE", 120, 10, 10_000),
             max_concurrent_requests=_env_int("MAX_CONCURRENT_REQUESTS", 24, 2, 256),
+            allowed_hosts=allowed_hosts,
             allowed_origins=origins,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             demo_enabled=_env_bool("DEMO_ENABLED", True),
@@ -130,6 +168,9 @@ class Settings:
             ai_timeout_seconds=_env_int("AI_TIMEOUT_SECONDS", 45, 5, 180),
             serpapi_key=os.getenv("SERPAPI_KEY", "").strip(),
             scheduler_enabled=_env_bool("SCHEDULER_ENABLED", True),
+            background_workers_enabled=_env_bool("BACKGROUND_WORKERS_ENABLED", True),
+            worker_poll_seconds=_env_int("WORKER_POLL_SECONDS", 2, 1, 60),
+            worker_lease_seconds=_env_int("WORKER_LEASE_SECONDS", 900, 60, 3600),
             timezone=os.getenv("APP_TIMEZONE", "Asia/Shanghai"),
             smtp_host=os.getenv("SMTP_HOST", "").strip(),
             smtp_port=_env_int("SMTP_PORT", 587, 1, 65535),

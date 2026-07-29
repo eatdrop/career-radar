@@ -4,7 +4,7 @@ Heavy optional integrations are imported lazily so the local web application
 can start even when MCP, Selenium, Qdrant, or the OpenAI SDK are not installed.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 def main() -> None:

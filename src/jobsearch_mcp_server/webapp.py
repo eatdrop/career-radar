@@ -20,13 +20,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from . import __version__
 from .config import Settings
 from .scheduler import RadarScheduler
 from .services import AppError, CareerService
+from .worker import DurableWorkerSupervisor
 
 LOGGER = logging.getLogger("jobsearch.web")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,80}$")
 APPLICATION_PATH = re.compile(r"^/api/v1/applications/(\d+)$")
+RADAR_OPERATION_PATH = re.compile(r"^/api/v1/radar/runs/(\d+)$")
 
 
 def _utc_now() -> str:
@@ -73,19 +76,30 @@ class CareerHTTPServer(ThreadingHTTPServer):
         self.rate_limiter = SlidingWindowRateLimiter(settings.rate_limit_per_minute)
         self.request_slots = threading.BoundedSemaphore(settings.max_concurrent_requests)
         super().__init__(address, CareerRequestHandler)
+        self.workers = DurableWorkerSupervisor(
+            self.service.repository,
+            {"radar_run": self.service.execute_radar_operation},
+            self.service.send_outbox_message,
+            poll_interval=settings.worker_poll_seconds,
+            lease_seconds=settings.worker_lease_seconds,
+        )
+        if settings.background_workers_enabled:
+            self.workers.start()
         self.scheduler = RadarScheduler(self.service, settings.timezone)
-        if settings.scheduler_enabled:
+        if settings.scheduler_enabled and settings.background_workers_enabled:
             self.scheduler.start()
 
     def server_close(self) -> None:
         if hasattr(self, "scheduler"):
             self.scheduler.stop()
+        if hasattr(self, "workers") and not self.workers.stop(timeout=10):
+            LOGGER.warning("background workers did not stop before shutdown timeout")
         super().server_close()
 
 
 class CareerRequestHandler(SimpleHTTPRequestHandler):
     server: CareerHTTPServer
-    server_version = "CareerEngine/1.0"
+    server_version = f"CareerEngine/{__version__}"
     sys_version = ""
     # Short-lived local API requests do not benefit enough from keep-alive to
     # justify one waiting thread per idle browser socket.
@@ -108,6 +122,7 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
             requested_id if REQUEST_ID_PATTERN.fullmatch(requested_id) else uuid.uuid4().hex
         )
         self.request_started = time.monotonic()
+        self.response_headers: dict[str, str] = {}
 
     def end_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -128,19 +143,39 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin", "").rstrip("/")
         if origin and origin in self.server.settings.allowed_origins:
             self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header(
+                "Access-Control-Expose-Headers",
+                "Location, Retry-After, X-Request-ID",
+            )
             self.send_header("Vary", "Origin")
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
         self._prepare_request()
+        if not self._host_allowed():
+            self._send_error(AppError(421, "host_not_allowed", "请求主机未被允许"))
+            return
         origin = self.headers.get("Origin", "").rstrip("/")
         if origin and origin not in self.server.settings.allowed_origins:
             self._send_error(AppError(403, "origin_forbidden", "该跨域来源未被允许"))
             return
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-Request-ID, Idempotency-Key",
+        )
         self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_HEAD(self) -> None:
+        self._prepare_request()
+        if not self._host_allowed():
+            self.send_response(HTTPStatus.MISDIRECTED_REQUEST)
+        else:
+            self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+            self.send_header("Allow", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -158,6 +193,9 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
 
     def _handle(self, method: str) -> None:
         self._prepare_request()
+        if not self._host_allowed():
+            self._send_error(AppError(421, "host_not_allowed", "请求主机未被允许"))
+            return
         parsed = urlparse(self.path)
         is_api = parsed.path.startswith("/api/") or parsed.path in {"/livez", "/readyz"}
         if not is_api:
@@ -165,6 +203,19 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
                 self._send_error(AppError(405, "method_not_allowed", "该资源不支持此请求方法"))
                 return
             self._serve_static(parsed.path)
+            return
+
+        if method == "GET" and parsed.path == "/livez":
+            self._send_success({"status": "ok", "version": __version__}, 200)
+            return
+        if method == "GET" and parsed.path == "/readyz":
+            try:
+                health = self._runtime_health()
+            except Exception:
+                LOGGER.exception("readiness probe failed")
+                self._send_error(AppError(503, "not_ready", "服务尚未就绪"))
+                return
+            self._send_success(health, 200 if health["status"] == "ok" else 503)
             return
 
         allowed, retry_after = self.server.rate_limiter.allow(self.client_address[0])
@@ -192,9 +243,9 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
         try:
             payload = self._read_json() if method in {"POST", "PATCH"} else {}
             data, status = self._dispatch(method, parsed.path, parse_qs(parsed.query), payload)
-            self._send_success(data, status)
+            self._send_success(data, status, self.response_headers)
         except AppError as exc:
-            self._send_error(exc)
+            self._send_error(exc, self.response_headers)
         except (BrokenPipeError, ConnectionResetError):
             LOGGER.info("client disconnected request_id=%s", self.request_id)
         except Exception:
@@ -211,17 +262,52 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
         payload: dict[str, Any],
     ) -> tuple[Any, int]:
         service = self.server.service
-        if method == "GET" and path in {"/api/health", "/api/v1/health", "/livez"}:
-            return service.health(), 200
-        if method == "GET" and path == "/readyz":
-            health = service.health()
-            return health, 200 if health["status"] == "ok" else 503
+        if method == "GET" and path in {"/api/health", "/api/v1/health"}:
+            return self._runtime_health(), 200
         if method == "GET" and path == "/api/v1/dashboard":
             return service.dashboard(), 200
         if method == "GET" and path == "/api/v1/radar":
             return service.radar_overview(), 200
+        if method == "GET" and path == "/api/v1/radar/runs":
+            limit = self._query_int(query, "limit", 20)
+            return service.list_radar_operations(limit), 200
+        operation_match = RADAR_OPERATION_PATH.fullmatch(path)
+        if method == "GET" and operation_match:
+            return service.get_radar_operation(int(operation_match.group(1))), 200
         if method == "PATCH" and path == "/api/v1/radar/settings":
             return service.update_radar_settings(payload), 200
+        if method == "POST" and path == "/api/v1/radar/runs":
+            if not self.server.settings.background_workers_enabled:
+                raise AppError(
+                    503,
+                    "background_workers_disabled",
+                    "异步雷达不可用：请启用 BACKGROUND_WORKERS_ENABLED",
+                )
+            if not self.server.workers.is_running:
+                self.response_headers = {"Retry-After": "5"}
+                raise AppError(
+                    503,
+                    "background_workers_unavailable",
+                    "异步雷达暂时不可用，请稍后重试",
+                )
+            idempotency_key = self.headers.get("Idempotency-Key", "").strip()
+            if not idempotency_key:
+                raise AppError(
+                    400,
+                    "idempotency_key_required",
+                    "异步雷达请求必须提供 Idempotency-Key",
+                )
+            operation = service.enqueue_radar_operation(
+                payload,
+                idempotency_key=idempotency_key,
+                trigger_type="manual",
+            )
+            self.server.workers.wake()
+            self.response_headers = {
+                "Location": operation["status_url"],
+                "Retry-After": "1",
+            }
+            return operation, 202
         if method == "POST" and path == "/api/v1/radar/run":
             return service.run_radar(payload, trigger_type="manual"), 200
         if method == "POST" and path == "/api/v1/jobs/crawl":
@@ -252,6 +338,54 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
             if method == "DELETE":
                 return service.delete_application(application_id), 200
         raise AppError(404, "route_not_found", "接口不存在")
+
+    def _runtime_health(self) -> dict[str, Any]:
+        health = self.server.service.health()
+        workers_expected = self.server.settings.background_workers_enabled
+        scheduler_expected = self.server.settings.scheduler_enabled
+        workers_ok = self.server.workers.is_running
+        scheduler_ok = self.server.scheduler.is_running
+        health["background_workers"] = (
+            "ok" if workers_ok else "disabled" if not workers_expected else "error"
+        )
+        if scheduler_expected and not workers_expected:
+            health["scheduler"] = "blocked_without_workers"
+        else:
+            health["scheduler"] = (
+                "ok" if scheduler_ok else "disabled" if not scheduler_expected else "error"
+            )
+        health["async_radar"] = "ok" if workers_ok else "unavailable"
+        if (
+            not workers_expected
+            or (workers_expected and not workers_ok)
+            or (scheduler_expected and not scheduler_ok)
+        ):
+            health["status"] = "degraded"
+        return health
+
+    def _host_allowed(self) -> bool:
+        host_headers = self.headers.get_all("Host", [])
+        if len(host_headers) != 1:
+            return False
+        raw_host = host_headers[0].strip()
+        if not raw_host or any(character.isspace() for character in raw_host):
+            return False
+        try:
+            parsed = urlparse(f"//{raw_host}")
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+            _ = parsed.port
+        except ValueError:
+            return False
+        if (
+            not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            return False
+        return hostname in self.server.settings.allowed_hosts
 
     @staticmethod
     def _query_value(query: dict[str, list[str]], name: str) -> str:
@@ -293,8 +427,15 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
             raise AppError(422, "invalid_payload", "JSON 请求体必须是对象")
         return payload
 
-    def _send_success(self, data: Any, status: int = 200) -> None:
+    def _send_success(
+        self,
+        data: Any,
+        status: int = 200,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         self.send_response(status)
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self._write_json(
             {
                 "success": True,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import html
 import importlib.util
 import json
@@ -22,12 +23,14 @@ from email.message import EmailMessage
 from io import BytesIO
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
+from . import __version__
 from .config import Settings
 from .repository import SQLiteRepository
+from .worker import DeliveryUnknownError, PermanentWorkerError, RetryWithoutAttemptError
 
 LOGGER = logging.getLogger("jobsearch.services")
 
@@ -56,7 +59,13 @@ EMAIL_PATTERN = re.compile(
 )
 PHONE_PATTERN = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
 CONTACT_HANDLE_PATTERN = re.compile(
-    r"(?i)(?:微信|wechat|qq)\s*[:：]?\s*[A-Za-z0-9_-]{5,32}"
+    r"(?i)(?:微信|wechat|qq)(?:\s*(?:id|号))?\s*[:：]?\s*[A-Za-z0-9_-]{5,32}"
+)
+INTERNATIONAL_PHONE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])\+\d{1,3}(?:[\s().-]*\d){7,14}(?![A-Za-z0-9])"
+)
+PUBLIC_PROFILE_PATTERN = re.compile(
+    r"(?i)https?://(?:www\.)?(?:linkedin\.com/in|github\.com)/[^\s<>'\"]+"
 )
 
 SKILL_GROUPS: dict[str, tuple[str, ...]] = {
@@ -207,10 +216,7 @@ def _clean_string_list(
         raise AppError(422, error_code, f"{field}必须是列表")
     if len(value) > max_items:
         raise AppError(422, error_code, f"{field}最多允许 {max_items} 项")
-    cleaned = [
-        _clean_text(item, limit=item_limit, field=field, required=True)
-        for item in value
-    ]
+    cleaned = [_clean_text(item, limit=item_limit, field=field, required=True) for item in value]
     cleaned = list(dict.fromkeys(cleaned))
     if required and not cleaned:
         raise AppError(422, error_code, f"至少设置一项{field}")
@@ -248,7 +254,21 @@ def _validate_resume_text(text: str) -> str:
 def _redact_contact_info(text: str) -> str:
     redacted = EMAIL_PATTERN.sub("[邮箱已隐藏]", text)
     redacted = PHONE_PATTERN.sub("[手机号已隐藏]", redacted)
-    return CONTACT_HANDLE_PATTERN.sub("[即时通讯账号已隐藏]", redacted)
+    redacted = INTERNATIONAL_PHONE_PATTERN.sub("[国际电话已隐藏]", redacted)
+    redacted = CONTACT_HANDLE_PATTERN.sub("[即时通讯账号已隐藏]", redacted)
+    return PUBLIC_PROFILE_PATTERN.sub("[公开账号已隐藏]", redacted)
+
+
+def _redact_nested_contact_info(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_contact_info(value)
+    if isinstance(value, list):
+        return [_redact_nested_contact_info(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_nested_contact_info(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _redact_nested_contact_info(item) for key, item in value.items()}
+    return value
 
 
 def _extract_skills(text: str) -> dict[str, list[str]]:
@@ -480,6 +500,25 @@ def _analyse_resume(text: str) -> tuple[dict[str, Any], dict[str, Any], str]:
     return structured, score, summary
 
 
+def _safe_external_url(value: Any) -> str:
+    candidate = str(value or "").strip()
+    if any(character.isspace() or ord(character) < 32 for character in candidate):
+        return ""
+    try:
+        parsed = urlsplit(candidate)
+        _ = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return ""
+    return candidate
+
+
 def _normalise_job(raw: dict[str, Any], index: int) -> dict[str, Any]:
     return {
         "id": str(raw.get("id") or f"job-{index}"),
@@ -493,7 +532,7 @@ def _normalise_job(raw: dict[str, Any], index: int) -> dict[str, Any]:
             raw.get("description") or raw.get("job_description") or raw.get("经验学历") or ""
         ),
         "source": str(raw.get("source") or raw.get("来源") or "导入"),
-        "url": str(raw.get("url") or ""),
+        "url": _safe_external_url(raw.get("url")),
     }
 
 
@@ -584,6 +623,26 @@ DEFAULT_RADAR_SETTINGS: dict[str, Any] = {
     "email_to": "",
 }
 
+RADAR_JOB_TYPE = "radar_run"
+RADAR_REQUEST_KEYS = frozenset({"sources", "use_demo", "send_email"})
+PERMANENT_RADAR_JOB_ERRORS = frozenset(
+    {
+        "resume_unavailable",
+        "no_job_sources",
+        "serpapi_unavailable",
+        "crawler_unavailable",
+    }
+)
+PUBLIC_RADAR_JOB_ERRORS = frozenset(
+    {
+        *PERMANENT_RADAR_JOB_ERRORS,
+        "aggregator_failed",
+        "crawler_failed",
+        "radar_failed",
+        "radar_run_failed",
+    }
+)
+
 
 @dataclass(slots=True)
 class Capability:
@@ -649,15 +708,21 @@ class CareerService:
         }
 
     def health(self) -> dict[str, Any]:
+        schema_version: int | None = None
+        queues: dict[str, dict[str, int]] = {}
         try:
             self.repository.application_statistics()
+            schema_version = self.repository.get_schema_version()
+            queues = self.repository.queue_statistics()
             database = "ok"
         except sqlite3.Error:  # pragma: no cover - defensive branch
             database = "error"
         return {
             "status": "ok" if database == "ok" else "degraded",
             "database": database,
-            "version": "1.0.0",
+            "schema_version": schema_version,
+            "queues": queues,
+            "version": __version__,
             "capabilities": self.capabilities(),
         }
 
@@ -670,7 +735,11 @@ class CareerService:
             "resumes": self.repository.count_resumes(),
             "applications": stats,
             "radar": {
-                "last_run": runs[0] if runs else None,
+                "last_run": (
+                    {key: value for key, value in runs[0].items() if key != "result"}
+                    if runs
+                    else None
+                ),
                 "settings": self.get_radar_settings(),
             },
             "capabilities": self.capabilities(),
@@ -758,9 +827,7 @@ class CareerService:
                 raise AppError(422, "invalid_result_limit", "推荐数量必须在 1–50 之间")
             current["max_results"] = count
         if "email_enabled" in payload:
-            current["email_enabled"] = _require_bool(
-                payload["email_enabled"], field="邮件推送开关"
-            )
+            current["email_enabled"] = _require_bool(payload["email_enabled"], field="邮件推送开关")
         if "email_to" in payload:
             email_to = _clean_text(payload["email_to"], limit=160, field="收件邮箱")
             if email_to and not EMAIL_PATTERN.fullmatch(email_to):
@@ -776,13 +843,212 @@ class CareerService:
         return self.get_radar_settings()
 
     def radar_overview(self) -> dict[str, Any]:
-        runs = self.repository.list_radar_runs(20)
+        runs = [
+            {key: value for key, value in run.items() if key != "result"}
+            for run in self.repository.list_radar_runs(20)
+        ]
         latest = self.repository.get_state("latest_radar", None)
         return {
             "settings": self.get_radar_settings(),
-            "latest": latest,
+            "latest": self._hydrate_email_delivery(latest),
             "runs": runs,
+            "operations": [
+                self._public_radar_operation(job, include_result=False)
+                for job in self.repository.list_operation_jobs(
+                    job_type=RADAR_JOB_TYPE,
+                    limit=20,
+                )
+            ],
         }
+
+    def _normalise_radar_request(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        if payload is None:
+            return {}
+        if not isinstance(payload, dict):
+            raise AppError(422, "invalid_payload", "请求体必须是 JSON 对象")
+        unknown = set(payload) - RADAR_REQUEST_KEYS
+        if unknown:
+            raise AppError(
+                422,
+                "unknown_fields",
+                f"包含不支持的字段：{', '.join(sorted(unknown))}",
+            )
+        normalised: dict[str, Any] = {}
+        if "use_demo" in payload:
+            normalised["use_demo"] = _require_bool(payload["use_demo"], field="演示数据开关")
+        if "send_email" in payload:
+            normalised["send_email"] = _require_bool(payload["send_email"], field="邮件发送开关")
+        if "sources" in payload:
+            sources = _clean_string_list(
+                payload["sources"],
+                field="职位来源",
+                item_limit=20,
+                max_items=4,
+                error_code="invalid_sources",
+            )
+            if any(source not in {"latest", "serpapi", "51job", "demo"} for source in sources):
+                raise AppError(422, "invalid_sources", "包含不支持的职位来源")
+            normalised["sources"] = sources
+        return normalised
+
+    def enqueue_radar_operation(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        idempotency_key: str,
+        trigger_type: str = "manual",
+    ) -> dict[str, Any]:
+        key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+        if not re.fullmatch(r"[A-Za-z0-9._:~/-]{8,128}", key):
+            raise AppError(
+                422,
+                "invalid_idempotency_key",
+                "Idempotency-Key 需为 8–128 位安全 ASCII 字符",
+            )
+        if trigger_type not in {"manual", "scheduled"}:
+            raise AppError(422, "invalid_trigger_type", "不支持的雷达触发类型")
+        request_payload = self._normalise_radar_request(payload)
+        key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        durable_key = f"radar:{trigger_type}:{key_hash}"
+        run_identity_hash = hashlib.sha256(durable_key.encode("utf-8")).hexdigest()
+        operation_payload = {
+            "request": request_payload,
+            "trigger_type": trigger_type,
+            "email_idempotency_key": f"radar-email:{trigger_type}:{key_hash}",
+            "radar_run_id": f"operation-{run_identity_hash}",
+        }
+        job, created = self.repository.enqueue_operation_job_once(
+            RADAR_JOB_TYPE,
+            operation_payload,
+            idempotency_key=durable_key,
+            max_attempts=3,
+        )
+        if not created and job.get("payload") != operation_payload:
+            raise AppError(
+                409,
+                "idempotency_conflict",
+                "该 Idempotency-Key 已用于不同的雷达请求",
+            )
+        return self._public_radar_operation(job, deduplicated=not created)
+
+    def execute_radar_operation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise PermanentWorkerError("持久任务载荷无效")
+        request_payload = payload.get("request")
+        trigger_type = payload.get("trigger_type")
+        email_key = payload.get("email_idempotency_key")
+        radar_run_id = payload.get("radar_run_id")
+        if (
+            not isinstance(request_payload, dict)
+            or trigger_type not in {"manual", "scheduled"}
+            or not isinstance(email_key, str)
+            or not email_key
+            or not isinstance(radar_run_id, str)
+            or not re.fullmatch(r"operation-[a-f0-9]{64}", radar_run_id)
+        ):
+            raise PermanentWorkerError("持久任务载荷无效")
+        try:
+            return self.run_radar(
+                request_payload,
+                trigger_type=str(trigger_type),
+                email_idempotency_key=email_key,
+                radar_run_id=radar_run_id,
+            )
+        except AppError as error:
+            if error.code == "radar_already_running":
+                raise RetryWithoutAttemptError(
+                    error.message,
+                    retry_after_seconds=30,
+                ) from error
+            if error.code in PERMANENT_RADAR_JOB_ERRORS:
+                raise PermanentWorkerError(error.message, code=error.code) from error
+            raise
+
+    def get_radar_operation(self, operation_id: int) -> dict[str, Any]:
+        job = self.repository.get_operation_job(operation_id)
+        if not job or job.get("job_type") != RADAR_JOB_TYPE:
+            raise AppError(404, "radar_run_not_found", "雷达任务不存在")
+        return self._public_radar_operation(job)
+
+    def list_radar_operations(self, limit: int = 20) -> dict[str, Any]:
+        jobs = self.repository.list_operation_jobs(
+            job_type=RADAR_JOB_TYPE,
+            limit=max(1, min(100, limit)),
+        )
+        return {"items": [self._public_radar_operation(job, include_result=False) for job in jobs]}
+
+    def _public_radar_operation(
+        self,
+        job: dict[str, Any],
+        *,
+        deduplicated: bool | None = None,
+        include_result: bool = True,
+    ) -> dict[str, Any]:
+        result = job.get("result")
+        error: dict[str, Any] | None = None
+        if job.get("status") == "failed":
+            raw_error = str(job.get("error") or "")
+            try:
+                decoded_error = json.loads(raw_error)
+            except json.JSONDecodeError:
+                decoded_error = {}
+            code = str(decoded_error.get("code") or "radar_run_failed")
+            if code not in PUBLIC_RADAR_JOB_ERRORS:
+                code = "radar_run_failed"
+            message = str(decoded_error.get("message") or "")
+            if not message or code == "radar_run_failed":
+                message = "求职雷达执行失败，请检查配置后重试"
+            error = {
+                "code": code,
+                "message": message[:300],
+                "retryable": bool(decoded_error.get("retryable", True)),
+            }
+        output: dict[str, Any] = {
+            "id": str(job["id"]),
+            "status": str(job["status"]),
+            "status_url": f"/api/v1/radar/runs/{job['id']}",
+            "created_at": job.get("created_at"),
+            "started_at": job.get("claimed_at") or job.get("heartbeat_at"),
+            "finished_at": job.get("completed_at"),
+            "attempts": int(job.get("attempts") or 0),
+            "max_attempts": int(job.get("max_attempts") or 0),
+            "result": (
+                self._hydrate_email_delivery(result)
+                if include_result and isinstance(result, dict)
+                else None
+            ),
+            "error": error,
+        }
+        if deduplicated is not None:
+            output["deduplicated"] = deduplicated
+        return output
+
+    def _hydrate_email_delivery(self, digest: Any) -> Any:
+        if not isinstance(digest, dict):
+            return digest
+        delivery = digest.get("email_delivery")
+        if not isinstance(delivery, dict):
+            return digest
+        message_id = delivery.get("message_id")
+        if isinstance(message_id, bool):
+            return digest
+        try:
+            parsed_id = int(message_id)
+        except (TypeError, ValueError):
+            return digest
+        message = self.repository.get_outbox_message(parsed_id)
+        if not message:
+            return digest
+        hydrated = dict(digest)
+        hydrated["email_delivery"] = {
+            "status": message["status"],
+            "message_id": parsed_id,
+        }
+        if message["status"] == "delivery_unknown":
+            hydrated["email_delivery"]["message"] = "邮件服务返回结果不明确，请核对收件箱"
+        elif message["status"] == "failed":
+            hydrated["email_delivery"]["message"] = "邮件发送失败，请检查 SMTP 配置"
+        return hydrated
 
     def _resume_text(self, resume: dict[str, Any] | None) -> str:
         if not resume:
@@ -796,21 +1062,44 @@ class CareerService:
         return self.repository.get_resume_evidence_text(resume_id)
 
     def run_radar(
-        self, payload: dict[str, Any] | None = None, trigger_type: str = "manual"
+        self,
+        payload: dict[str, Any] | None = None,
+        trigger_type: str = "manual",
+        *,
+        email_idempotency_key: str | None = None,
+        radar_run_id: str | None = None,
     ) -> dict[str, Any]:
-        if payload is not None and not isinstance(payload, dict):
-            raise AppError(422, "invalid_payload", "请求体必须是 JSON 对象")
+        normalised_payload = self._normalise_radar_request(payload)
         if not self._radar_lock.acquire(blocking=False):
             raise AppError(409, "radar_already_running", "求职雷达正在运行，请稍后再试")
         try:
-            return self._run_radar(payload or {}, trigger_type)
+            return self._run_radar(
+                normalised_payload,
+                trigger_type,
+                email_idempotency_key=email_idempotency_key,
+                radar_run_id=radar_run_id,
+            )
         finally:
             self._radar_lock.release()
 
     def _run_radar(
-        self, payload: dict[str, Any], trigger_type: str
+        self,
+        payload: dict[str, Any],
+        trigger_type: str,
+        *,
+        email_idempotency_key: str | None,
+        radar_run_id: str | None,
     ) -> dict[str, Any]:
-        run_id = uuid.uuid4().hex
+        run_id = radar_run_id or uuid.uuid4().hex
+        if radar_run_id:
+            existing = self.repository.get_radar_run(radar_run_id)
+            if (
+                existing
+                and existing.get("status") == "completed"
+                and isinstance(existing.get("result"), dict)
+                and existing["result"].get("summary")
+            ):
+                return self._hydrate_email_delivery(existing["result"])
         self.repository.create_radar_run(run_id, trigger_type)
         source_count = 0
         candidate_count = 0
@@ -837,10 +1126,7 @@ class CareerService:
                     max_items=4,
                     error_code="invalid_sources",
                 )
-                if any(
-                    source not in {"latest", "serpapi", "51job", "demo"}
-                    for source in sources
-                ):
+                if any(source not in {"latest", "serpapi", "51job", "demo"} for source in sources):
                     raise AppError(422, "invalid_sources", "包含不支持的职位来源")
 
             resume = self.repository.get_latest_resume()
@@ -895,9 +1181,7 @@ class CareerService:
             candidate_count = len(jobs)
 
             filtered, rejected = self._filter_radar_jobs(jobs, radar_settings)
-            ranked = self._rank_jobs(
-                resume_text, filtered, int(radar_settings["max_results"])
-            )
+            ranked = self._rank_jobs(resume_text, filtered, int(radar_settings["max_results"]))
             for job in ranked:
                 evidence = self.repository.retrieve_resume_evidence(
                     resume["id"],
@@ -938,20 +1222,45 @@ class CareerService:
                 and (trigger_type == "scheduled" or send_email)
             )
             if should_email:
-                digest["email_delivery"] = self._send_digest_email(
-                    radar_settings["email_to"], digest
-                )
-
-            self.repository.set_state("latest_radar", digest)
-            self.repository.finish_radar_run(
+                digest["email_delivery"] = {"status": "queued"}
+            delivery_key = (
+                email_idempotency_key
+                if should_email and email_idempotency_key
+                else f"radar-email:run:{run_id}"
+            )
+            completed_digest, _ = self.repository.complete_radar_run(
                 run_id,
-                status="completed",
                 source_count=source_count,
                 candidate_count=candidate_count,
                 shortlisted_count=len(shortlisted),
                 result=digest,
+                outbox_recipient=(str(radar_settings["email_to"]) if should_email else ""),
+                outbox_idempotency_key=delivery_key if should_email else "",
+                outbox_payload=(
+                    {
+                        "summary": dict(digest["summary"]),
+                        "items": [
+                            {
+                                field: job.get(field)
+                                for field in (
+                                    "title",
+                                    "score",
+                                    "company",
+                                    "location",
+                                    "salary",
+                                    "why_fit",
+                                    "resume_tips",
+                                    "url",
+                                )
+                            }
+                            for job in digest["items"]
+                        ],
+                    }
+                    if should_email
+                    else None
+                ),
             )
-            return digest
+            return completed_digest
         except AppError as exc:
             self.repository.finish_radar_run(
                 run_id,
@@ -993,7 +1302,7 @@ class CareerService:
             )
             request = Request(
                 f"https://serpapi.com/search.json?{query}",
-                headers={"User-Agent": "CareerEngine/1.0"},
+                headers={"User-Agent": f"CareerEngine/{__version__}"},
             )
             try:
                 with urlopen(request, timeout=25) as response:
@@ -1018,7 +1327,7 @@ class CareerService:
                         "location": item.get("location", city),
                         "description": item.get("description", ""),
                         "source": "Google Jobs",
-                        "url": apply_url,
+                        "url": _safe_external_url(apply_url),
                     }
                 )
         return output
@@ -1128,12 +1437,44 @@ class CareerService:
         results.sort(key=lambda item: item["score"], reverse=True)
         return results[:limit]
 
-    def _send_digest_email(self, recipient: str, digest: dict[str, Any]) -> dict[str, Any]:
+    def send_outbox_message(self, message: dict[str, Any]) -> None:
+        recipient = message.get("recipient")
+        digest = message.get("payload")
+        message_id = message.get("id")
+        if (
+            not isinstance(recipient, str)
+            or not EMAIL_PATTERN.fullmatch(recipient)
+            or not isinstance(digest, dict)
+            or isinstance(message_id, bool)
+            or not isinstance(message_id, int)
+        ):
+            raise PermanentWorkerError("邮件任务载荷无效")
+        try:
+            self._send_digest_email(
+                recipient,
+                digest,
+                outbox_message_id=message_id,
+                raise_errors=True,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise PermanentWorkerError("邮件任务内容无效") from error
+
+    def _send_digest_email(
+        self,
+        recipient: str,
+        digest: dict[str, Any],
+        *,
+        outbox_message_id: int | None = None,
+        raise_errors: bool = False,
+    ) -> dict[str, Any]:
         if not self.capabilities()["email"]["enabled"]:
+            if raise_errors:
+                raise PermanentWorkerError("SMTP 未配置")
             return {"status": "skipped", "message": "SMTP 未配置"}
         items = digest["items"]
         cards = []
         for job in items:
+            job_url = _safe_external_url(job.get("url"))
             cards.append(
                 "<article style='border:1px solid #d9e2e8;padding:16px;margin:12px 0;border-radius:10px'>"
                 f"<h3>{html.escape(job['title'])} · {job['score']}/100</h3>"
@@ -1142,8 +1483,8 @@ class CareerService:
                 f"<p><strong>为什么适合：</strong>{html.escape(job['why_fit'])}</p>"
                 f"<p><strong>简历动作：</strong>{html.escape('；'.join(job['resume_tips']))}</p>"
                 + (
-                    f"<p><a href='{html.escape(job['url'], quote=True)}'>查看岗位</a></p>"
-                    if job.get("url")
+                    f"<p><a href='{html.escape(job_url, quote=True)}'>查看岗位</a></p>"
+                    if job_url
                     else ""
                 )
                 + "</article>"
@@ -1160,18 +1501,61 @@ class CareerService:
         message["Subject"] = f"今日 {summary['shortlisted']} 个值得投递的岗位｜智职引擎"
         message["From"] = self.settings.smtp_from or self.settings.smtp_user
         message["To"] = recipient
+        if outbox_message_id is not None:
+            sender_domain = message["From"].partition("@")[2] or "career-radar.local"
+            if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", sender_domain):
+                sender_domain = "career-radar.local"
+            message["Message-ID"] = f"<career-radar-{outbox_message_id}@{sender_domain.lower()}>"
         message.set_content("请使用支持 HTML 的邮件客户端查看今日求职雷达。")
         message.add_alternative(body, subtype="html")
+        delivery_started = False
         try:
             with smtplib.SMTP(self.settings.smtp_host, self.settings.smtp_port, timeout=20) as smtp:
                 if self.settings.smtp_use_tls:
                     smtp.starttls(context=ssl.create_default_context())
                 smtp.login(self.settings.smtp_user, self.settings.smtp_password)
-                smtp.send_message(message)
+                delivery_started = True
+                refused = smtp.send_message(message)
+                if refused:
+                    raise smtplib.SMTPRecipientsRefused(refused)
             return {"status": "sent", "recipient": recipient}
+        except smtplib.SMTPServerDisconnected as exc:
+            LOGGER.warning("digest email disconnected during_delivery=%s", delivery_started)
+            if raise_errors and delivery_started:
+                raise DeliveryUnknownError(
+                    "SMTP connection closed while delivery acknowledgement was pending"
+                ) from exc
+            if raise_errors:
+                raise RuntimeError("SMTP connection failed") from exc
+        except (
+            smtplib.SMTPAuthenticationError,
+            smtplib.SMTPRecipientsRefused,
+            smtplib.SMTPSenderRefused,
+            smtplib.SMTPNotSupportedError,
+            ssl.SSLCertVerificationError,
+        ) as exc:
+            LOGGER.warning("digest email permanently rejected type=%s", type(exc).__name__)
+            if raise_errors:
+                raise PermanentWorkerError("SMTP 配置或收件地址被拒绝") from exc
+        except smtplib.SMTPResponseException as exc:
+            LOGGER.warning(
+                "digest email response failed code=%s type=%s",
+                exc.smtp_code,
+                type(exc).__name__,
+            )
+            if raise_errors:
+                if int(exc.smtp_code) >= 500:
+                    raise PermanentWorkerError("SMTP 服务永久拒绝邮件") from exc
+                raise RuntimeError("SMTP 服务暂时拒绝邮件") from exc
         except (OSError, smtplib.SMTPException) as exc:
             LOGGER.warning("digest email failed type=%s", type(exc).__name__)
-            return {"status": "failed", "message": "邮件发送失败，请检查 SMTP 配置"}
+            if raise_errors:
+                if delivery_started:
+                    raise DeliveryUnknownError(
+                        "SMTP transport failed after delivery began; acceptance is unknown"
+                    ) from exc
+                raise RuntimeError("SMTP 暂时不可用") from exc
+        return {"status": "failed", "message": "邮件发送失败，请检查 SMTP 配置"}
 
     def _now_local_iso(self) -> str:
         try:
@@ -1273,24 +1657,23 @@ class CareerService:
         raw_for_storage = text if self.settings.store_raw_resume else ""
         evidence_text = _redact_contact_info(text)
         structured_for_storage = structured
+        summary_for_storage = summary
         stored_source_name = source_name
+        stored_name = structured["basic_info"]["name"]
         if not self.settings.store_raw_resume:
-            structured_for_storage = {
-                **structured,
-                "basic_info": {
-                    **structured["basic_info"],
-                    "email": "",
-                    "phone": "",
-                },
-            }
+            structured_for_storage = _redact_nested_contact_info(structured)
+            structured_for_storage["basic_info"]["email"] = ""
+            structured_for_storage["basic_info"]["phone"] = ""
+            summary_for_storage = _redact_contact_info(summary)
             stored_source_name = _redact_contact_info(source_name)
+            stored_name = _redact_contact_info(stored_name)
         self.repository.save_resume(
             resume_id=resume_id,
-            name=structured["basic_info"]["name"],
+            name=stored_name,
             source_name=stored_source_name,
             raw_text=raw_for_storage,
             evidence_text=evidence_text,
-            summary=summary,
+            summary=summary_for_storage,
             structured=structured_for_storage,
             score=score,
         )
@@ -1419,11 +1802,7 @@ class CareerService:
             if latest_resume
             else []
         )
-        ai_result = (
-            self._ai_enhance(resume_text, jd, template, evidence)
-            if allow_ai
-            else None
-        )
+        ai_result = self._ai_enhance(resume_text, jd, template, evidence) if allow_ai else None
         if ai_result:
             optimized = ai_result
             mode = "ai"
