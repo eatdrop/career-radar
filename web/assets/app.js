@@ -5,6 +5,7 @@
 const API_BASE = "/api/v1";
 const MAX_RESUME_FILE_BYTES = 4 * 1024 * 1024;
 const RADAR_RUN_STORAGE_KEY = "career-radar.active-run.v1";
+const SAVED_JOBS_STORAGE_KEY = "career-radar.saved-jobs.v1";
 const RADAR_POLL_TIMEOUT_MS = 3 * 60 * 1000;
 const RADAR_TERMINAL_STATUSES = new Set(["succeeded", "failed"]);
 const RADAR_ACTIVE_STATUSES = new Set(["queued", "running", "retrying"]);
@@ -29,6 +30,8 @@ const state = {
   health: null,
   dashboard: null,
   radar: null,
+  radarItems: [],
+  savedJobKeys: new Set(),
   jobPool: [],
   applications: [],
   resumeMode: "text",
@@ -60,6 +63,97 @@ function append(parent, ...children) {
     if (child !== null && child !== undefined) parent.append(child);
   }
   return parent;
+}
+
+function readSavedJobKeys() {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(SAVED_JOBS_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(value) ? value.filter((item) => typeof item === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function storeSavedJobKeys() {
+  try {
+    window.localStorage.setItem(
+      SAVED_JOBS_STORAGE_KEY,
+      JSON.stringify([...state.savedJobKeys].slice(-500)),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function jobIdentity(job) {
+  const canonicalUrl = /^https?:\/\//i.test(job.url || "") ? job.url.trim() : "";
+  return canonicalUrl || [job.company, job.title, job.location]
+    .map((value) => String(value || "").trim().toLocaleLowerCase("zh-CN"))
+    .join("|");
+}
+
+function searchableJobText(job) {
+  return [
+    job.title,
+    job.company,
+    job.location,
+    job.salary,
+    job.source,
+    job.why_fit,
+    ...(job.matched_keywords || []),
+    ...(job.missing_keywords || []),
+  ].join(" ").toLocaleLowerCase("zh-CN");
+}
+
+function setSaveButtonState(button, saved) {
+  button.setAttribute("aria-pressed", String(saved));
+  button.setAttribute("aria-label", saved ? "取消收藏这个岗位" : "收藏这个岗位");
+  button.title = saved ? "取消收藏" : "收藏岗位";
+  button.querySelector("[aria-hidden]")?.replaceChildren(saved ? "★" : "☆");
+}
+
+function syncSavedCount() {
+  byId("radarSavedCount").textContent = String(state.savedJobKeys.size);
+}
+
+function resetRadarFilters() {
+  byId("radarResultQuery").value = "";
+  byId("radarResultSort").value = "score";
+  byId("radarSavedOnly").setAttribute("aria-pressed", "false");
+  renderRadarItems();
+  byId("radarResultQuery").focus();
+}
+
+function renderRadarItems() {
+  const container = byId("radarResults");
+  const filterEmpty = byId("radarFilterEmpty");
+  container.replaceChildren();
+  const query = byId("radarResultQuery").value.trim().toLocaleLowerCase("zh-CN");
+  const savedOnly = byId("radarSavedOnly").getAttribute("aria-pressed") === "true";
+  const sort = byId("radarResultSort").value;
+  const items = state.radarItems
+    .filter((job) => !query || searchableJobText(job).includes(query))
+    .filter((job) => !savedOnly || state.savedJobKeys.has(jobIdentity(job)))
+    .sort((left, right) => {
+      if (sort === "company") {
+        return String(left.company || "").localeCompare(String(right.company || ""), "zh-CN");
+      }
+      if (sort === "salary") {
+        const leftHasSalary = Boolean(left.salary && !/面议|未注明/.test(left.salary));
+        const rightHasSalary = Boolean(right.salary && !/面议|未注明/.test(right.salary));
+        if (leftHasSalary !== rightHasSalary) return rightHasSalary - leftHasSalary;
+      }
+      return Number(right.score || 0) - Number(left.score || 0);
+    });
+  items.forEach((job, index) => container.append(createRecommendationCard(job, index + 1)));
+  filterEmpty.hidden = state.radarItems.length === 0 || items.length > 0;
+  byId("radarVisibleCount").textContent = `${items.length} 个岗位`;
+  const controlsEnabled = state.radarItems.length > 0;
+  ["radarResultQuery", "radarResultSort", "radarSavedOnly", "radarFilterReset"].forEach((id) => {
+    byId(id).disabled = !controlsEnabled;
+  });
+  syncSavedCount();
 }
 
 function showToast(message, type = "info", duration = 4500) {
@@ -160,7 +254,7 @@ function switchPanel(name, updateHash = true) {
   document.querySelectorAll("[data-panel-content]").forEach((panel) => {
     panel.classList.toggle("is-active", panel.dataset.panelContent === name);
   });
-  document.querySelectorAll(".nav-item").forEach((item) => {
+  document.querySelectorAll("[data-panel]").forEach((item) => {
     const active = item.dataset.panel === name;
     item.classList.toggle("is-active", active);
     if (active) item.setAttribute("aria-current", "page");
@@ -352,8 +446,11 @@ function renderRadarOverview(overview) {
 function renderRadarDigest(digest) {
   const empty = byId("radarEmpty");
   const container = byId("radarResults");
+  const panel = byId("panel-radar");
   container.replaceChildren();
   if (!digest || !digest.summary) {
+    panel.classList.remove("has-results");
+    state.radarItems = [];
     empty.hidden = false;
     byId("radarShortlisted").textContent = "0";
     byId("radarCollected").textContent = "0";
@@ -361,6 +458,7 @@ function renderRadarDigest(digest) {
     byId("radarRejected").textContent = "0";
     byId("radarRunState").textContent = "待运行";
     renderFilterLog([]);
+    renderRadarItems();
     return;
   }
 
@@ -375,8 +473,10 @@ function renderRadarDigest(digest) {
   renderFilterLog(digest.filter_breakdown || []);
 
   const items = Array.isArray(digest.items) ? digest.items : [];
+  state.radarItems = items;
+  panel.classList.toggle("has-results", items.length > 0);
   empty.hidden = items.length > 0;
-  items.forEach((job) => container.append(createRecommendationCard(job)));
+  renderRadarItems();
   if (items.length === 0) {
     empty.hidden = false;
     empty.querySelector("h3").textContent = "今天没有岗位通过你的门槛";
@@ -384,18 +484,53 @@ function renderRadarDigest(digest) {
   }
 }
 
-function createRecommendationCard(job) {
+function createRecommendationCard(job, rank) {
   const card = make("article", { className: "recommendation-card" });
+  card.dataset.jobKey = jobIdentity(job);
   const score = make("div", { className: "match-score" });
-  append(score, make("strong", { text: job.score ?? 0 }), make("span", { text: "MATCH / 100" }));
+  append(
+    score,
+    make("small", { className: "recommendation-rank", text: `#${rank}` }),
+    make("strong", { text: job.score ?? 0 }),
+    make("span", { text: "匹配度" }),
+  );
 
   const main = make("div", { className: "recommendation-main" });
-  append(main, make("h3", { text: job.title || "未命名岗位" }));
+  const heading = make("div", { className: "job-title-row" });
+  const titleGroup = make("div");
+  append(
+    titleGroup,
+    make("h3", { text: job.title || "未命名岗位" }),
+    make("strong", { className: "job-salary", text: job.salary || "薪资面议" }),
+  );
+  const save = make("button", { className: "save-job-button", type: "button" });
+  save.append(make("span", { text: "☆" }));
+  save.firstElementChild.setAttribute("aria-hidden", "true");
+  setSaveButtonState(save, state.savedJobKeys.has(jobIdentity(job)));
+  save.addEventListener("click", () => {
+    const key = jobIdentity(job);
+    const willSave = !state.savedJobKeys.has(key);
+    if (willSave) state.savedJobKeys.add(key);
+    else state.savedJobKeys.delete(key);
+    const stored = storeSavedJobKeys();
+    setSaveButtonState(save, willSave);
+    syncSavedCount();
+    if (byId("radarSavedOnly").getAttribute("aria-pressed") === "true") {
+      renderRadarItems();
+    }
+    showToast(
+      stored
+        ? willSave ? "已收藏岗位。" : "已取消收藏。"
+        : "当前浏览器无法保存收藏状态。",
+      stored ? "info" : "warning",
+    );
+  });
+  append(heading, titleGroup, save);
+  main.append(heading);
   const meta = make("div", { className: "job-meta" });
   [
     job.company || "未知公司",
     job.location || "地点未注明",
-    job.salary || "薪资面议",
     job.source || "未知来源",
   ].forEach((value) => meta.append(make("span", { text: value })));
   main.append(meta);
@@ -418,24 +553,29 @@ function createRecommendationCard(job) {
   }
 
   const side = make("div", { className: "recommendation-side" });
-  side.append(make("h4", { text: "投递前，简历先做这几件事" }));
+  side.append(make("h4", { text: "投递前建议" }));
   const tips = make("ul");
   (job.resume_tips || []).forEach((tip) => tips.append(make("li", { text: tip })));
+  if (!tips.childElementCount) tips.append(make("li", { text: "核对岗位发布时间与官方申请入口。" }));
   side.append(tips);
   const actions = make("div", { className: "card-actions" });
-  const track = make("button", { className: "button button-primary button-compact", type: "button", text: "加入投递" });
-  track.addEventListener("click", () => openApplicationDialog(null, job));
-  actions.append(track);
   if (job.url && /^https?:\/\//i.test(job.url)) {
     const link = make("a", {
-      className: "button button-secondary button-compact",
-      text: "查看岗位 ↗",
+      className: "button button-primary button-compact",
+      text: "查看并投递 ↗",
       href: job.url,
       target: "_blank",
       rel: "noopener noreferrer",
     });
     actions.append(link);
   }
+  const track = make("button", {
+    className: "button button-secondary button-compact",
+    type: "button",
+    text: "记入投递看板",
+  });
+  track.addEventListener("click", () => openApplicationDialog(null, job));
+  actions.append(track);
   side.append(actions);
   append(card, score, main, side);
   return card;
@@ -707,6 +847,12 @@ async function completeRadarRun(task, record, resumed) {
     showToast("雷达任务已完成，最新结果正在同步。");
   }
   warnIfRefreshFailed(refreshResults);
+  window.requestAnimationFrame(() => {
+    byId("radarResultQuery").scrollIntoView({
+      behavior: REDUCED_MOTION_QUERY.matches ? "auto" : "smooth",
+      block: "center",
+    });
+  });
 }
 
 async function continueRadarRun(record, options = {}) {
@@ -1291,7 +1437,7 @@ async function loadJobPool() {
 }
 
 function bindEvents() {
-  document.querySelectorAll(".nav-item").forEach((button) => {
+  document.querySelectorAll("[data-panel]").forEach((button) => {
     button.addEventListener("click", () => switchPanel(button.dataset.panel));
   });
   document.querySelectorAll("[data-switch-panel]").forEach((button) => {
@@ -1326,6 +1472,28 @@ function bindEvents() {
   byId("radarSettingsForm").addEventListener("submit", saveRadarSettings);
   byId("minScore").addEventListener("input", () => {
     byId("minScoreValue").textContent = byId("minScore").value;
+  });
+  byId("radarResultQuery").addEventListener("input", renderRadarItems);
+  byId("radarResultSort").addEventListener("change", renderRadarItems);
+  byId("radarSavedOnly").addEventListener("click", () => {
+    const button = byId("radarSavedOnly");
+    const active = button.getAttribute("aria-pressed") !== "true";
+    button.setAttribute("aria-pressed", String(active));
+    renderRadarItems();
+  });
+  byId("radarFilterReset").addEventListener("click", resetRadarFilters);
+  document.querySelector("[data-reset-radar-filters]")
+    .addEventListener("click", resetRadarFilters);
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    const isTyping = target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target instanceof HTMLSelectElement
+      || target?.isContentEditable;
+    if (event.key === "/" && !isTyping && state.currentPanel === "radar") {
+      event.preventDefault();
+      byId("radarResultQuery").focus();
+    }
   });
 
   document.querySelectorAll("[data-resume-mode]").forEach((button) => {
@@ -1387,6 +1555,8 @@ function bindEvents() {
 }
 
 async function initialise() {
+  state.savedJobKeys = readSavedJobKeys();
+  syncSavedCount();
   bindEvents();
   syncMobileNavigation();
   setResumeMode(state.resumeMode);

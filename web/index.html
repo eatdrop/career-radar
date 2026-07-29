@@ -6,8 +6,8 @@
   <meta name="description" content="智职引擎每日求职雷达：自动聚合、过滤、匹配岗位，并给出逐岗简历建议。">
   <title>智职引擎 · 每日求职雷达</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/styles.css?v=1.1.0">
-  <script src="/assets/app.js?v=1.1.0" defer></script>
+  <link rel="stylesheet" href="/assets/styles.css?v=1.2.0-ui1">
+  <script src="/assets/app.js?v=1.2.0-ui1" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -60,7 +60,7 @@
 
       <div class="sidebar-footer">
         <span>LOCAL FIRST</span>
-        <span>v1.1</span>
+        <span>v1.2</span>
       </div>
     </aside>
 
@@ -139,6 +139,32 @@
             </div>
           </div>
 
+          <section class="discovery-toolbar" aria-label="推荐岗位筛选">
+            <label class="discovery-search">
+              <span class="search-icon" aria-hidden="true">⌕</span>
+              <span class="sr-only">搜索推荐岗位</span>
+              <input type="search" id="radarResultQuery"
+                     placeholder="搜索岗位、公司、城市或技能">
+              <kbd aria-hidden="true">/</kbd>
+            </label>
+            <label class="discovery-select">
+              <span class="sr-only">推荐岗位排序</span>
+              <select id="radarResultSort">
+                <option value="score">匹配度优先</option>
+                <option value="company">公司名称</option>
+                <option value="salary">薪资信息优先</option>
+              </select>
+            </label>
+            <button class="filter-toggle" type="button" id="radarSavedOnly"
+                    aria-pressed="false">
+              <span aria-hidden="true">☆</span>
+              <span>只看收藏</span>
+              <strong id="radarSavedCount">0</strong>
+            </button>
+            <button class="filter-reset" type="button" id="radarFilterReset">清除筛选</button>
+            <span class="visible-result-count" id="radarVisibleCount" aria-live="polite">0 个岗位</span>
+          </section>
+
           <div class="section-heading">
             <div>
               <span class="eyebrow">SHORTLIST</span>
@@ -149,6 +175,12 @@
                     data-switch-panel="preferences">调整筛选规则</button>
           </div>
           <div class="job-recommendations" id="radarResults"></div>
+          <div class="filter-empty" id="radarFilterEmpty" hidden>
+            <strong>没有符合当前筛选的岗位</strong>
+            <span>换个关键词，或清除“只看收藏”。</span>
+            <button class="button button-secondary button-compact" type="button"
+                    data-reset-radar-filters>清除筛选</button>
+          </div>
           <div class="empty-state" id="radarEmpty">
             <div class="empty-visual" aria-hidden="true">
               <span></span><span></span><span></span>
@@ -581,6 +613,21 @@
       </main>
     </div>
   </div>
+
+  <nav class="mobile-bottom-nav" aria-label="移动端快捷导航">
+    <button type="button" data-panel="radar" aria-label="今日雷达">
+      <span aria-hidden="true">⌁</span><small>雷达</small>
+    </button>
+    <button type="button" data-panel="jobs" aria-label="岗位池">
+      <span aria-hidden="true">▦</span><small>岗位</small>
+    </button>
+    <button type="button" data-panel="applications" aria-label="投递看板">
+      <span aria-hidden="true">✓</span><small>投递</small>
+    </button>
+    <button type="button" data-panel="resume" aria-label="简历画像">
+      <span aria-hidden="true">◫</span><small>简历</small>
+    </button>
+  </nav>
 
   <dialog id="applicationDialog" class="modal" aria-labelledby="applicationDialogTitle">
     <form method="dialog" class="modal-shell" id="applicationForm">
