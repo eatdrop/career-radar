@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from jobsearch_mcp_server.config import _env_bool
+from jobsearch_mcp_server.config import Settings, _env_bool
 
 
 @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
@@ -26,3 +28,15 @@ def test_env_bool_rejects_ambiguous_values(monkeypatch: pytest.MonkeyPatch) -> N
 
     with pytest.raises(ValueError, match="TEST_BOOLEAN"):
         _env_bool("TEST_BOOLEAN", False)
+
+
+def test_settings_load_dotenv_from_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("APP_PORT", raising=False)
+    tmp_path.joinpath(".env").write_text("APP_PORT=4317\n", encoding="utf-8")
+
+    settings = Settings.from_env()
+
+    assert settings.port == 4317

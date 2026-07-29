@@ -1,5 +1,10 @@
 include LICENSE
 include README.md
+include CHANGELOG.md
+include web_server.py
+include .env.example
+include Dockerfile
+include .dockerignore
 recursive-include web *.html *.css *.js *.svg
 recursive-include tests *.py
 prune .private

@@ -83,22 +83,8 @@ def fetch_51job(
 
     try:
         print(f"[浏览器] 正在初始化浏览器（{'无头模式' if headless else '有界面模式'}）...")
-        # 优先使用本地缓存的 ChromeDriver，避免每次联网检查版本更新
-        import glob
-
-        cached_drivers = glob.glob(
-            os.path.expanduser(
-                r"~\.wdm\drivers\chromedriver\win64\*\chromedriver-win32\chromedriver.exe"
-            )
-        )
-        if cached_drivers:
-            # 使用最新缓存的版本
-            chrome_driver_path = max(cached_drivers, key=os.path.getmtime)
-            print(f"[浏览器] 使用本地缓存 ChromeDriver: {chrome_driver_path}")
-            service = Service(chrome_driver_path)
-        else:
-            print("[浏览器] 未找到本地缓存，尝试在线下载...")
-            service = Service(ChromeDriverManager().install())
+        # webdriver-manager 自行处理 Windows/macOS/Linux 的驱动与缓存位置。
+        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
         search_url = (
@@ -115,9 +101,12 @@ def fetch_51job(
             print("[成功] 职位列表加载成功")
         except Exception:
             print("[警告] 等待职位列表超时，可能触发了反爬或需要登录")
-            with open("debug_page.html", "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            print("[保存] 已保存页面源码到 debug_page.html")
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                debug_path = os.path.join(output_dir, "debug_page.html")
+                with open(debug_path, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                print(f"[保存] 已保存页面源码到 {debug_path}")
             return all_jobs
 
         for page in range(1, max_pages + 1):

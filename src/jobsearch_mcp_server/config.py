@@ -21,10 +21,19 @@ def _default_data_dir() -> Path:
 
 
 def _default_web_dir() -> Path:
-    source_dir = PROJECT_ROOT / "web"
-    if source_dir.joinpath("index.html").is_file():
-        return source_dir
-    return Path(sys.prefix) / "share" / "jobsearch-ai-assistant" / "web"
+    relative = Path("share") / "jobsearch-ai-assistant" / "web"
+    candidates = [PROJECT_ROOT / "web"]
+    candidates.extend(parent / relative for parent in Path(__file__).resolve().parents)
+    candidates.append(Path(sys.prefix) / relative)
+    for candidate in candidates:
+        if candidate.joinpath("index.html").is_file():
+            return candidate
+    return candidates[-1]
+
+
+def _default_env_file() -> Path:
+    working_copy = Path.cwd() / ".env"
+    return working_copy if working_copy.is_file() else PROJECT_ROOT / ".env"
 
 
 def _load_env_file(path: Path) -> None:
@@ -95,7 +104,7 @@ class Settings:
 
     @classmethod
     def from_env(cls, env_file: Path | None = None) -> Settings:
-        _load_env_file(env_file or PROJECT_ROOT / ".env")
+        _load_env_file(env_file or _default_env_file())
         origins = tuple(
             origin.strip().rstrip("/")
             for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
