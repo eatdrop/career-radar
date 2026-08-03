@@ -1,352 +1,385 @@
-# 智职引擎 · 每日求职雷达
+# Career Radar｜AI 大学生求职雷达与投递跟进 Agent
 
-> 面向大学生的自动化求职工作流：每天聚合岗位、过滤噪声、基于简历证据排序、生成逐岗改写建议，并把行动沉淀到投递看板。
+> 给大学生和应届生使用的本地优先 AI 求职工作台：每天聚合并过滤岗位，用简历真实证据解释匹配，再把收藏、投递、跟进和面试沉淀成一条可持续工作流。
 
-## 项目文档导航
+[![CI](https://github.com/eatdrop/career-radar/actions/workflows/ci.yml/badge.svg)](https://github.com/eatdrop/career-radar/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/eatdrop/career-radar?label=release)](https://github.com/eatdrop/career-radar/releases/latest)
+[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![License](https://img.shields.io/github/license/eatdrop/career-radar)](LICENSE)
+[![Local First](https://img.shields.io/badge/privacy-local--first-1f4d46)](#隐私与部署边界)
 
-- [公开项目报告](docs/PUBLIC_PROJECT_REPORT.md)：面向用户、面试官、评审与合作方，完整介绍痛点、产品、工程价值、成熟度和公开路线图。
-- [跨 Codex 账号续接报告](docs/CODEX_CONTINUATION_GUIDE.md)：面向后续维护者，记录事实基线、架构边界、风险、v1.4 Definition of Done、发布回滚手册和新账号启动提示词。
-- [技术架构](plans/architecture.md)：当前业务流、运行架构、关键边界和持久化模型。
-- [安全策略](SECURITY.md) 与 [发布检查表](.github/RELEASE_CHECKLIST.md)：公开部署边界、漏洞报告和正式发布门禁。
-- [版本记录](CHANGELOG.md)：各正式版本已交付能力。
+[快速开始](#3-分钟快速开始) · [查看真实界面](#真实运行界面) · [为什么不是普通-llm-wrapper](#为什么不是普通-llm-wrapper) · [常见问题](#常见问题) · [公开路线图](#公开路线图)
 
-## 它解决的不是“不会写简历”
+![Career Radar 真实运行界面](docs/assets/career-radar-overview.jpg)
 
-大学生求职最耗时的往往是重复劳动：
+> 截图来自当前版本的真实浏览器运行结果，使用合成简历和带“演示”标识的岗位；不是概念设计图。
 
-1. 每天在多个平台反复搜索；
-2. 从大量社招、资深、外包和过期岗位中找校招机会；
-3. 逐条阅读 JD，再回头确认自己的项目是否匹配；
-4. 为不同岗位调整简历；
-5. 投递后忘记记录，面试时找不到上下文。
+## 3 秒看懂
 
-智职引擎把这段流程收敛为一条可执行管线：
+| 你提供 | 系统每天完成 | 你最终得到 |
+|---|---|---|
+| 一份简历画像和求职偏好 | 聚合岗位 → 过滤噪声 → 检索简历证据 → 可解释排序 | 更少但更值得看的岗位、逐岗简历动作和今日待办 |
 
-```text
-定时/手动触发
-  → 持久任务排队、幂等去重与失败重试
-  → 聚合岗位池、Google Jobs、51job
-  → 去重与硬门槛过滤
-  → 检索相关简历证据
-  → 可解释匹配排序
-  → 岗位新鲜度与用户反馈校准
-  → 每岗生成简历动作
-  → 站内摘要 / 邮件摘要
-  → 一键进入投递看板、提醒跟进与统计转化
+大学生求职最耗时的通常不是“不会写简历”，而是：
+
+- 每天在多个平台重复搜索；
+- 从社招、资深、外包、重复和过期岗位中找校招机会；
+- 逐条阅读 JD，再回头确认自己的哪段经历能证明匹配；
+- 针对不同岗位反复改简历；
+- 投递后忘记记录、跟进或准备面试。
+
+Career Radar 把这些分散操作收敛成一条可以每天运行、可以失败恢复、可以持续校准的求职工作流。
+
+## 真实运行界面
+
+<p align="center">
+  <img src="docs/assets/career-radar-results.jpg" alt="岗位证据匹配与投递建议" width="70%">
+  <img src="docs/assets/career-radar-mobile.jpg" alt="移动端求职雷达" width="25%">
+</p>
+
+- 桌面端直接展示岗位匹配分、命中关键词、待核能力和投递前动作；
+- 移动端保留雷达、岗位、投递和简历四个高频入口；
+- 演示岗位始终标注“演示数据”，发布时间未知时明确要求投递前核验；
+- 收藏、不感兴趣、岗位失效和已投递反馈会持久化，避免第二天重复清理。
+
+## 30 秒建立信任
+
+这里不展示未经验证的“效率提升 300%”。当前可以被代码、测试和公开 Release 复核的证据是：
+
+| 证据 | 当前状态 |
+|---|---|
+| 完整产品闭环 | 简历画像 → 岗位聚合 → 规则过滤 → 证据排序 → 反馈 → 投递 → 跟进 |
+| 自动化回归 | 88 项 pytest 测试 |
+| 跨平台门禁 | Ubuntu / Windows，Python 3.11 / 3.12 |
+| 发行验证 | wheel、源码包、冷安装、`pip check`、`/readyz` |
+| 容器验证 | 多阶段构建、非 root 运行、健康检查 |
+| 后台可靠性 | 幂等任务、租约心跳、崩溃接管、旧 Worker fencing |
+| 邮件可靠性 | 事务 Outbox、稳定 Message-ID、未知送达隔离 |
+| 数据演进 | SQLite schema v4，可从旧数据库事务内无损升级 |
+| 隐私默认值 | 本机监听、原始简历默认不落库、联系方式脱敏、AI 按次授权 |
+
+正式版本与产物：[`v1.3.0`](https://github.com/eatdrop/career-radar/releases/tag/v1.3.0)。
+
+## 3 分钟快速开始
+
+### 1. 准备环境
+
+- Python 3.11 或 3.12；
+- Git；
+- Chrome 只在使用 51job 可选采集时需要。
+
+检查 Python：
+
+```bash
+python3 --version
 ```
 
-核心原则是“先用确定性规则减少噪声，再把 AI 用在需要判断和表达的地方”。没有 API Key 时，离线核心流程仍可运行；外部能力不会静默伪造成功。
+Windows 可以使用：
 
-## 5 分钟跑通
+```powershell
+py -3.12 --version
+```
 
-核心业务不依赖第三方运行时框架，推荐 Python 3.11 或 3.12；Windows
-会自动安装 `tzdata` 以补充时区数据。
+### 2. 下载并启动
+
+macOS / Linux：
 
 ```bash
 git clone https://github.com/eatdrop/career-radar.git
 cd career-radar
-python3 web_server.py
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python web_server.py
 ```
 
-浏览器打开：
+Windows PowerShell：
+
+```powershell
+git clone https://github.com/eatdrop/career-radar.git
+cd career-radar
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe web_server.py
+```
+
+核心演示流程不要求 API Key，也不需要先安装前端依赖。
+
+### 3. 打开并完成首次验收
+
+浏览器访问：
 
 ```text
 http://127.0.0.1:3000
 ```
 
-首次验收：
+然后按照页面完成：
 
-1. 按首页三步引导建立简历画像、确认求职目标并准备岗位来源；
-2. 没有真实岗位时勾选“用演示数据验收”；
-3. 点击“立即跑一次”，获得第一批推荐；
-4. 用搜索、匹配度排序和收藏快速收敛候选岗位；
-5. 查看匹配理由、RAG 引用的简历证据和逐岗修改建议；
-6. 收藏、忽略或标记失效岗位；将合适岗位加入投递看板；
-7. 设置下一步行动、跟进或面试时间，并在看板查看待办与转化数据。
+1. 粘贴一份合成简历，建立简历画像；
+2. 返回“今日雷达”，勾选“用演示数据验收”；
+3. 点击“立即跑一次”；
+4. 查看匹配证据和投递建议；
+5. 收藏、忽略或将岗位记入投递看板；
+6. 设置下一步行动、跟进或面试时间。
 
-演示岗位始终带“演示”标识，不会与真实岗位混淆。
+正常情况下，不配置任何外部服务也可以跑通这条闭环。
 
-### 前端使用体验
+## 它解决的是刚需吗
 
-- **岗位优先**：首次进入解释工作流；已有推荐后自动收起说明，把岗位列表放到首屏。
-- **快速收敛**：按岗位、公司、城市或技能搜索，可按匹配度、公司或薪资信息排序。
-- **首次激活**：三步引导实时显示简历、偏好和岗位来源的准备进度。
-- **持续校准**：收藏同步到本地数据库；“不感兴趣”和“岗位失效”会阻止后续雷达重复推荐。
-- **岗位可信度**：岗位卡显示发布时间/截止时间的新鲜度状态；未知信息会要求投递前核验。
-- **行动闭环**：有官方链接时直接查看并投递，同时可预填投递记录、简历版本、跟进与面试提醒。
-- **效果可量化**：投递看板展示 7 天内待办、回复率和各阶段数量。
-- **移动优先**：窄屏提供雷达、岗位、投递、简历四个高频入口的底部导航。
-- **键盘友好**：在今日雷达按 `/` 可聚焦岗位搜索框；所有主要操作支持键盘焦点。
+### 是真实问题，但目标人群不是“所有人”
 
-界面信息架构借鉴主流求职产品的搜索优先、收藏与投递状态模型，但不复制任何平台的品牌视觉或专有内容。
+Career Radar 针对的是高频求职期的大学生、应届生和初级岗位候选人。对只偶尔查看一个岗位的人，它可能过重；对每天跨平台筛选、修改和跟进的人，重复劳动和决策疲劳是真实且持续的成本。
 
-## 配置真实工作流
+项目选择收窄用户，而不是用“所有求职者都需要”夸大市场。
 
-复制环境变量模板：
+### 抓住 AI Agent 趋势，但不把模型当产品
+
+项目里的 Agent 不是聊天框包装，而是：
+
+- 有明确目标：每天找出值得投入时间的岗位；
+- 有工具：岗位源、规则过滤、简历证据检索、可选模型、邮件和投递 CRM；
+- 有状态：简历、偏好、任务、反馈、投递和提醒都持久化；
+- 有反馈：收藏、忽略、失效和投递影响后续结果；
+- 有边界：外部能力显式降级，AI 不能无证据新增经历。
+
+### 当前仍需真实用户证明的部分
+
+项目已经证明“可以稳定运行和发布”，但尚未公开声称“提高了多少面试率”。v1.4 会优先通过 3–5 名真实用户至少 7 天的试用，验证：
+
+- 无效岗位阅读量是否下降；
+- 重复噪声率是否下降；
+- 每个有效投递所需时间是否减少；
+- 跟进完成率和面试转化是否改善。
+
+没有样本时不虚构增长数据，这是降低 AI 生成感的重要原则。
+
+## 为什么不是普通 LLM Wrapper
+
+| 常见一次性 AI 求职工具 | Career Radar |
+|---|---|
+| 输入 JD，生成一段文本 | 每日持续聚合、过滤、匹配和跟踪 |
+| 只给出“适合/不适合” | 展示命中关键词、缺口和简历证据 |
+| 每次请求没有历史 | SQLite 保存偏好、反馈、任务、投递和提醒 |
+| 模型失败后流程中断 | 无 Key 时本地核心仍可运行，失败显式降级 |
+| 生成内容容易补充不存在的经历 | AI 按次授权，并受简历证据约束 |
+| 内存线程或同步请求 | 持久任务、幂等、lease、重试和崩溃恢复 |
+| 发邮件失败就直接重发 | Outbox 区分可重试失败与未知送达 |
+
+独特价值不在于“接入了大模型”，而在于把模型放进一个受证据、授权、故障语义和用户反馈约束的业务流程。
+
+## 核心功能
+
+### 岗位发现与降噪
+
+- 本地岗位池、SerpAPI、51job 可选采集和显式演示数据；
+- 稳定 `job_key`、岗位来源、发布时间、截止时间和新鲜度；
+- 排除词、Senior/Lead/Manager 和三年以上经验门槛；
+- 搜索、排序、收藏、只看收藏和跨运行反馈过滤。
+
+### 简历证据匹配
+
+- TXT、DOCX、PDF 或粘贴文本；
+- 技能、教育、经历、项目和量化成果解析；
+- 本地证据分块与检索；
+- 匹配关键词、缺失关键词、引用证据和逐岗修改动作；
+- 可选 DeepSeek 增强，默认不调用外部 AI。
+
+### 投递与行动闭环
+
+- submitted、viewed、interviewing、offered、rejected 状态；
+- 简历版本、岗位链接、备注和下一步行动；
+- 跟进时间、面试时间、7 日待办和逾期提示；
+- 回复率、面试率和状态时间线数据基础；
+- 可选每日邮件摘要。
+
+## 工作原理
+
+```mermaid
+flowchart LR
+    Trigger["手动 / 每日定时"] --> Queue["持久任务"]
+    Queue --> Sources["岗位池 / SerpAPI / 51job"]
+    Sources --> Filter["去重 + 硬门槛 + 用户反馈"]
+    Resume["简历画像"] --> Evidence["本地证据检索"]
+    Filter --> Rank["可解释排序"]
+    Evidence --> Rank
+    Rank --> Digest["逐岗行动建议"]
+    Digest --> Web["今日雷达"]
+    Digest --> Email["事务 Outbox 邮件"]
+    Web --> CRM["投递与跟进"]
+    CRM --> Feedback["结果反馈"]
+    Feedback --> Filter
+```
+
+匹配分是用于排序的可解释启发式，不是招聘方 ATS 分数，也不是录用概率。
+
+## 接入真实能力
+
+复制配置模板：
 
 ```bash
 cp .env.example .env
 ```
 
-### 岗位来源
-
-| 来源 | 配置 | 说明 |
-|---|---|---|
-| 本地岗位池 | 无 | 粘贴一个或多个 JD，最稳定 |
-| Google Jobs | `SERPAPI_KEY` | 通过 SerpAPI 聚合公开岗位 |
-| 51job | 安装 `crawler` 可选依赖 | 依赖 Chrome，站点验证可能影响采集 |
-| 演示岗位 | 无 | 只用于本地验收 |
-
-安装实时采集能力：
+按需安装：
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[crawler]'
+pip install -e '.[dev]'
 ```
 
-请遵守目标网站服务条款、robots 规则和合理访问频率。生产环境优先使用正式招聘 API 或已授权的数据源。
+| 能力 | 安装/配置 | 说明 |
+|---|---|---|
+| Google Jobs 聚合 | `SERPAPI_KEY` | 通过 SerpAPI 获取公开岗位 |
+| DeepSeek 增强 | `pip install -e '.[ai]'` + `DEEPSEEK_API_KEY` | 只有用户本次明确授权才调用 |
+| PDF 简历 | `pip install -e '.[files]'` | TXT/DOCX 不需要额外依赖 |
+| 51job 采集 | `pip install -e '.[crawler]'` | 依赖 Chrome，可能受站点验证影响 |
+| MCP | `pip install -e '.[mcp]'` | allowlist 适配层，不是 Web 前置条件 |
+| 邮件摘要 | 配置 `SMTP_*` | 密码仅从服务端环境变量读取 |
 
-### PDF 简历解析
+请遵守岗位来源的服务条款、robots 规则和合理频率。生产用途优先使用正式 API 或授权数据源，不要绕过验证码或访问控制。
 
-TXT 和 DOCX 解析无需额外依赖；PDF 解析需要安装文件处理依赖：
+## Docker
+
+```bash
+cp .env.example .env
+docker build -t career-radar .
+docker run --rm -p 127.0.0.1:3000:3000 \
+  -v career-radar-data:/data \
+  --env-file .env \
+  career-radar
+```
+
+示例只将端口发布到宿主机回环地址。
+
+## 常见问题
+
+<details>
+<summary><strong>没有 API Key，可以使用吗？</strong></summary>
+
+可以。简历画像、本地证据检索、规则匹配、演示雷达和投递看板都能离线运行。SerpAPI、DeepSeek、SMTP 和 51job 是可选增强。
+</details>
+
+<details>
+<summary><strong>启动后浏览器打不开怎么办？</strong></summary>
+
+先确认终端没有报错，并访问 `http://127.0.0.1:3000`，不要使用 `0.0.0.0`。如果 3000 端口被占用：
+
+```bash
+python3 web_server.py --port 3001
+```
+
+然后访问 `http://127.0.0.1:3001`。
+</details>
+
+<details>
+<summary><strong>提示 python3 或 py 不存在怎么办？</strong></summary>
+
+安装 Python 3.11 或 3.12，并在安装 Windows Python 时勾选 “Add Python to PATH”。重新打开终端后执行 `python3 --version` 或 `py -3.12 --version`。
+</details>
+
+<details>
+<summary><strong>PDF 简历为什么解析失败？</strong></summary>
+
+安装文件处理依赖：
 
 ```bash
 pip install -e '.[files]'
 ```
 
-### DeepSeek 定向简历
+扫描版 PDF 可能没有文本层，当前版本不内置 OCR；可以先导出为可复制文本的 PDF、DOCX 或 TXT。
+</details>
 
-```dotenv
-DEEPSEEK_API_KEY=your_new_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-flash
-```
+<details>
+<summary><strong>51job 没有采集到岗位，是程序坏了吗？</strong></summary>
 
-然后安装 AI 可选依赖：
+不一定。页面结构、登录验证、验证码和地区网络都可能影响 Selenium 采集。系统会明确返回失败，不会伪造真实岗位。优先使用本地岗位池或正式招聘 API。
+</details>
 
-```bash
-pip install -e '.[ai]'
-```
+<details>
+<summary><strong>演示岗位是真实岗位吗？</strong></summary>
 
-DeepSeek 已于 2026-07-24 退役 `deepseek-chat` / `deepseek-reasoner` 旧名称，本项目默认使用 `deepseek-v4-flash`。模型变化以 [DeepSeek 官方更新日志](https://api-docs.deepseek.com/updates/)为准。
+不是。演示岗位只用于验证完整流程，界面始终显示“演示数据”，不能作为真实投递依据。
+</details>
 
-### 每日邮件摘要
+<details>
+<summary><strong>简历会上传给大模型吗？</strong></summary>
 
-```dotenv
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USER=your-account
-SMTP_PASSWORD=your-app-password
-SMTP_FROM=your-account@example.com
-SMTP_USE_TLS=true
-```
+默认不会。`STORE_RAW_RESUME=false` 时原文不持久化，证据块先脱敏并保存在本机。即使配置了 AI Key，也只有用户在本次优化中明确授权才会发送相关内容。
+</details>
 
-SMTP 凭据只从服务端环境变量读取。前端和数据库只保存收件地址，不保存邮箱密码。
-邮件通过事务 Outbox 异步发送：雷达结果先与“待发送”意图原子落库，短暂故障会自动退避重试；
-如果 SMTP 在提交邮件后断开、无法判断是否送达，系统会隔离为 `delivery_unknown`，不会冒险重复发送。
-管理员应先核对邮件服务商日志和收件箱，再通过本地运维命令确认送达或安排一次受控重试：
+<details>
+<summary><strong>数据保存在哪里，怎样备份？</strong></summary>
 
-```bash
-jobsearch-ops --data-dir /path/to/data outbox list-unknown
-jobsearch-ops --data-dir /path/to/data outbox confirm-delivered 12
-jobsearch-ops --data-dir /path/to/data outbox retry 12 --delay-seconds 60
-```
+默认保存在系统用户数据目录下的 `jobsearch-ai-assistant/job_tracker.db`。也可以通过 `APP_DATA_DIR` 指定目录。升级前停止服务并备份整个数据目录，详细步骤见[跨账号续接与运维报告](docs/CODEX_CONTINUATION_GUIDE.md#23-备份恢复与回滚)。
+</details>
 
-不要在无法确认服务商是否已接收邮件时执行 `retry`，否则仍可能产生重复邮件。
+<details>
+<summary><strong>可以直接部署到公网吗？</strong></summary>
 
-进入“求职偏好”后设置：
+不可以直接暴露。当前版本没有账号、MFA、多租户或 RBAC。远程访问必须放在启用 TLS、身份认证和访问审计的网关之后，并配置精确的 `ALLOWED_HOSTS`。
+</details>
 
-- 搜索关键词与城市；
-- 岗位来源；
-- 是否只看校招/初级岗位；
-- Senior、Lead、外包、年限等排除词；
-- 最低匹配分和每日推荐上限；
-- 每日执行时间与邮件推送。
+<details>
+<summary><strong>这是自动投递工具吗？</strong></summary>
 
-内置调度器按“时区 + 自然日”写入持久幂等任务，服务重启后任务不会丢失。默认 Worker
-使用 claim token、可续租 lease 和指数退避执行任务。单节点可直接使用默认配置；多副本部署应让实例
-共享同一任务存储，或设置 `SCHEDULER_ENABLED=false`，由 Cron / Kubernetes CronJob 调用
-`POST /api/v1/radar/runs` 并为同一业务批次复用 `Idempotency-Key`。
+不是。系统帮助发现、判断、改写和跟进，但不会替用户登录招聘平台、绕过限制或批量代投。最终内容和操作都由用户确认。
+</details>
 
-后台执行参数：
+## 隐私与部署边界
 
-```dotenv
-BACKGROUND_WORKERS_ENABLED=true
-WORKER_POLL_SECONDS=2
-WORKER_LEASE_SECONDS=900
-```
+- 当前定位：可信设备上的单用户本地优先 Beta；
+- 默认监听 `127.0.0.1`，CORS 关闭并严格校验 Host；
+- 不保存 SMTP 密码或 AI Key 到数据库；
+- 默认不持久化原始简历，并脱敏常见联系方式；
+- API 不包含登录、多租户或企业权限；
+- SQLite 目标是单节点，不支持真正多节点水平扩展；
+- 企业化需要认证、租户隔离、PostgreSQL/独立队列、审计、备份和事件响应。
 
-默认 Web 工作流依赖同进程 Worker。若设置 `BACKGROUND_WORKERS_ENABLED=false`，服务会停止
-内置调度、拒绝新的异步雷达任务，并让 `/readyz` 返回未就绪；兼容同步接口仍可由可信的内部
-调用方使用。不要把“关闭 Worker”当作外部 Worker 模式，当前版本未提供独立 Worker 进程。
+漏洞请按 [`SECURITY.md`](SECURITY.md) 私密报告，不要在公开 Issue 中上传真实简历、数据库、API Key 或利用细节。
 
-## RAG 是怎样落地的
-
-旧版本在 Embedding 失败时写入哈希伪向量，会产生随机相似度。该逻辑已被移除。
-
-当前实现采用本地“证据检索增强”：
-
-1. 分析简历时按段落切分证据块并持久化；
-2. 对每个 JD 检索最相关的简历块；
-3. 匹配结果展示实际引用证据；
-4. 调用大模型改写时，把检索证据置于提示词前部；
-5. 只有用户在本次请求中明确授权，才会把简历与 JD 发送给已配置模型；
-6. 模型被明确禁止新增事实；本地证据与雷达记录会脱敏已识别的邮箱、中国大陆手机号、
-   `+` 开头的国际电话、微信/QQ 号以及 LinkedIn/GitHub 公开账号。
-
-这使每个推荐都能回答“为什么匹配”，也避免把失败的向量调用包装成 RAG 成功。
-
-## 工程能力
-
-- 单进程 Web + REST，核心流程无需 MCP 中转；
-- REST 与 MCP 复用同一业务服务；
-- 版本化 JSON API 与正确的 4xx/5xx；
-- SQLite WAL、`busy_timeout`、短连接并发模型；
-- schema v4 迁移、持久任务、岗位反馈、投递时间线、租约心跳、崩溃接管与旧 Worker fencing；
-- 事务 Outbox、稳定邮件 Message-ID、自动重试与不确定送达隔离；
-- 业务完成后的最终任务对账、锁竞争无损 defer，以及 Outbox 本地人工处置命令；
-- 请求体大小限制、速率限制、并发上限；
-- 默认仅监听 `127.0.0.1`，严格校验 `Host`，CORS 默认关闭；
-- CSP、点击劫持防护、MIME 嗅探防护等安全头；
-- 请求 ID、超时、外部能力显式降级；
-- 调度幂等：同一时区的同一自然日只创建一个持久任务；
-- PDF/DOCX/TXT 文件上传，不接受任意服务端路径；
-- 响应式、键盘可操作、减少动画模式；
-- Docker 非 root 运行与健康检查。
-
-## 项目结构
-
-```text
-achievement/
-├── docs/
-│   ├── PUBLIC_PROJECT_REPORT.md       # 面向公众的产品与工程报告
-│   └── CODEX_CONTINUATION_GUIDE.md    # 跨账号续接与后续路线图
-├── web/
-│   ├── index.html
-│   └── assets/
-│       ├── app.js
-│       └── styles.css
-├── src/jobsearch_mcp_server/
-│   ├── config.py          # 环境配置与安全默认值
-│   ├── repository.py      # SQLite、简历证据库与运行记录
-│   ├── services.py        # 雷达、匹配、简历、投递业务逻辑
-│   ├── scheduler.py       # 每日持久任务触发器
-│   ├── worker.py          # 持久任务与邮件 Outbox Worker
-│   ├── ops.py             # 可信本地队列处置命令
-│   ├── webapp.py          # 版本化 REST 与静态资源服务
-│   ├── server.py          # allowlist MCP 适配器
-│   └── crawler/           # 51job 可选采集器
-├── tests/
-├── web_server.py          # 源码模式兼容启动器
-├── pyproject.toml
-├── Dockerfile
-└── .env.example
-```
-
-## API 摘要
-
-| 方法 | 路径 | 用途 |
-|---|---|---|
-| GET | `/api/v1/health` | 健康状态与能力探测 |
-| GET | `/api/v1/dashboard` | 工作台汇总 |
-| GET / PATCH | `/api/v1/radar` / `/api/v1/radar/settings` | 雷达结果与偏好 |
-| POST | `/api/v1/radar/runs` | 幂等创建异步雷达任务（推荐） |
-| GET | `/api/v1/radar/runs/{id}` | 查询排队、运行、重试或最终结果 |
-| POST | `/api/v1/radar/run` | 同步运行（兼容旧客户端） |
-| GET / POST | `/api/v1/jobs` / `/api/v1/jobs/import` | 岗位池 |
-| GET / POST | `/api/v1/jobs/feedback` | 查询或更新收藏、忽略、失效与已投递反馈 |
-| POST | `/api/v1/jobs/crawl` | 采集或显式演示岗位 |
-| POST | `/api/v1/resumes/analyze` | 建立简历画像和证据库 |
-| POST | `/api/v1/resumes/enhance` | 生成 JD 定向版本 |
-| GET / POST | `/api/v1/applications` | 查询或新增投递 |
-| PATCH / DELETE | `/api/v1/applications/{id}` | 更新或删除投递 |
-
-所有响应使用统一格式：
-
-```json
-{
-  "success": true,
-  "data": {},
-  "meta": {
-    "request_id": "…",
-    "timestamp": "…"
-  }
-}
-```
-
-异步创建接口返回 HTTP `202`、`Location` 和 `Retry-After`。客户端必须为一次用户动作生成
-8–128 位 `Idempotency-Key`，在网络超时或重试时复用；同一个 Key 携带不同参数会返回
-`409 idempotency_conflict`。任务查询不会返回内部 payload、claim token 或幂等键。
-
-## 测试
+## 开发与验证
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e '.[dev]'
+ruff check src tests web_server.py
+ruff format --check src tests web_server.py
 pytest
 ```
 
-88 项测试覆盖离线核心闭环、校招过滤、RAG 证据、岗位反馈、投递提醒、schema v4 迁移、
-调度幂等、投递 CRUD、HTTP 契约、队列并发、租约恢复、邮件 Outbox、
-Host/DNS-rebinding 防护、隐私脱敏与安全响应头。
+正式发布还需执行 wheel 冷安装、Docker 冒烟、真实浏览器验收、备份恢复和 [Release checklist](.github/RELEASE_CHECKLIST.md)。
 
-CI 在 Linux/Windows 和 Python 3.11/3.12 上执行静态检查与测试。质量矩阵通过后，
-发布门禁会构建最终 wheel，在全新虚拟环境安装该 wheel 并验证 `/readyz`；另一个作业
-会构建但不推送 Docker 镜像，并验证容器以非 root 用户运行且就绪探针正常。
+## 公开路线图
 
-## Docker
+### v1.4：个性化求职行动 Agent
 
-```bash
-docker build -t career-radar .
-docker run --rm -p 127.0.0.1:3000:3000 \
-  -v career-radar-data:/data \
-  --env-file .env \
-  -e APP_HOST=0.0.0.0 \
-  career-radar
-```
+- 本地求职漏斗和推荐批次评测；
+- 由收藏、忽略、投递和结果驱动的可解释个性化排序；
+- 一岗一策：证据映射、改写草稿、求职信、面试准备和跟进草稿；
+- 今日行动中心和投递时间线；
+- 岗位可信度、主动有效性核验和跨来源去重；
+- Playwright 主流程和自动化无障碍检查；
+- 3–5 名真实用户至少 7 天的试用复盘。
 
-容器内部监听 `0.0.0.0`，但示例只把端口发布到宿主机 `127.0.0.1`；本机源码启动也默认只
-监听回环地址。API 不自带多用户身份认证，禁止直接把端口发布到局域网或公网；确需远程访问时，
-必须在前置网关启用 TLS、身份认证与访问审计，并通过 `ALLOWED_HOSTS` 显式加入反向代理使用的
-主机名。`ALLOWED_ORIGINS` 只控制浏览器跨域，不等同于身份认证。
+路线图不等于已经交付。完整 Definition of Done 和 v1.5/v2.0 条件路线见[跨 Codex 账号续接报告](docs/CODEX_CONTINUATION_GUIDE.md#17-v14-建议范围个性化求职行动-agent)。
 
-### 数据升级、备份与恢复
+## 文档导航
 
-启动 v1.3.0 时会在同一个事务中自动把旧数据库迁移到 schema v4；检测到由更高版本创建的
-数据库时会拒绝启动，避免降级程序破坏数据。升级前请先停止服务并备份数据卷：
+- [公开项目报告](docs/PUBLIC_PROJECT_REPORT.md)：面向用户、面试官、评审和合作方；
+- [跨 Codex 账号续接报告](docs/CODEX_CONTINUATION_GUIDE.md)：完整架构、边界、风险、规划、发布和回滚手册；
+- [技术架构](plans/architecture.md)：业务流、运行架构和持久化；
+- [版本记录](CHANGELOG.md)：正式版本已交付能力；
+- [安全策略](SECURITY.md)：安全边界和漏洞报告；
+- [发布检查表](.github/RELEASE_CHECKLIST.md)：公开发布人工门禁。
 
-```bash
-cp /path/to/data/job_tracker.db /safe/backup/job_tracker.db
-```
+## 参与项目
 
-恢复时停止服务，用备份替换数据库后再启动；同时保留同目录中的 `-wal` / `-shm` 文件时必须
-来自同一次停机快照。更稳妥的在线备份应使用 SQLite Backup API 或运维平台的卷快照。
-当前 SQLite 部署目标是单节点；真正的多节点横向扩展应把队列和业务库迁移到受管数据库。
-雷达历史和终态队列默认保留在本地数据库中，便于审计和故障对账；列表 API 只返回摘要，
-邮件 Outbox 只保存投递所需的最小字段。请根据所在组织的数据保留制度定期备份、归档或删除
-本地数据卷，当前版本不会擅自执行 TTL 清理。
+欢迎提交可复现 Bug、脱敏后的岗位解析失败样本、校招过滤规则、移动端/无障碍问题和能直接改善求职结果的产品建议。
 
-## 隐私与安全
+如果这个项目确实减少了你的重复筛岗或跟进遗漏，欢迎 Star，并在 Issue 中分享不含个人信息的使用反馈。真实失败样本比“很好用”更能帮助项目迭代。
 
-- 简历、投递和运行记录包含个人敏感信息，数据库文件不会进入构建产物；
-- `.env`、本地数据库、向量旧数据、虚拟环境和调试页面均已加入忽略；
-- 如果密钥曾进入代码目录、压缩包或版本历史，请在供应商控制台轮换，单纯删除文件并不能使旧密钥失效；
-- 公网部署必须在反向代理层增加 TLS、身份认证、访问审计和备份策略；
-- 默认 `STORE_RAW_RESUME=false`，不持久化原文，并递归脱敏已识别的结构化联系方式；系统只保留本地匹配所需的最小证据；
-- 即使服务端配置了 AI Key，简历工坊也只会在用户对本次处理明确授权后调用外部模型。
+## License
 
-漏洞请按照 [Security Policy](SECURITY.md) 私密报告，不要在公开 Issue 中提交利用细节或真实数据。
-正式版本发布前必须完成 [Release checklist](.github/RELEASE_CHECKLIST.md)。Dependabot
-每周检查 Python、GitHub Actions 与 Docker 基础镜像更新；CI 中的 GitHub 官方 Actions
-固定到完整提交 SHA，并由 Dependabot 提交升级 PR。
-
-## MCP
-
-MCP 是可选适配层，不再是 Web 运行前置条件：
-
-```bash
-pip install -e '.[mcp]'
-jobsearch-mcp-server
-```
-
-MCP 默认监听 `127.0.0.1:8000`，仅暴露 allowlist 工具，不提供任意工具调用或服务端路径读取。
+[MIT](LICENSE)

@@ -7,7 +7,7 @@ include web_server.py
 include .env.example
 include Dockerfile
 include .dockerignore
-recursive-include docs *.md
+recursive-include docs *.md *.jpg
 recursive-include plans *.md
 recursive-include web *.html *.css *.js *.svg
 recursive-include tests *.py
