@@ -2,6 +2,14 @@
 
 > 面向大学生的自动化求职工作流：每天聚合岗位、过滤噪声、基于简历证据排序、生成逐岗改写建议，并把行动沉淀到投递看板。
 
+## 项目文档导航
+
+- [公开项目报告](docs/PUBLIC_PROJECT_REPORT.md)：面向用户、面试官、评审与合作方，完整介绍痛点、产品、工程价值、成熟度和公开路线图。
+- [跨 Codex 账号续接报告](docs/CODEX_CONTINUATION_GUIDE.md)：面向后续维护者，记录事实基线、架构边界、风险、v1.4 Definition of Done、发布回滚手册和新账号启动提示词。
+- [技术架构](plans/architecture.md)：当前业务流、运行架构、关键边界和持久化模型。
+- [安全策略](SECURITY.md) 与 [发布检查表](.github/RELEASE_CHECKLIST.md)：公开部署边界、漏洞报告和正式发布门禁。
+- [版本记录](CHANGELOG.md)：各正式版本已交付能力。
+
 ## 它解决的不是“不会写简历”
 
 大学生求职最耗时的往往是重复劳动：
@@ -211,6 +219,9 @@ WORKER_LEASE_SECONDS=900
 
 ```text
 achievement/
+├── docs/
+│   ├── PUBLIC_PROJECT_REPORT.md       # 面向公众的产品与工程报告
+│   └── CODEX_CONTINUATION_GUIDE.md    # 跨账号续接与后续路线图
 ├── web/
 │   ├── index.html
 │   └── assets/
