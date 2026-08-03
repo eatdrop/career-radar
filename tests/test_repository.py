@@ -63,7 +63,7 @@ def test_schema_migration_upgrades_v1_without_losing_records(tmp_path: Path) -> 
             row[0] for row in connection.execute("SELECT version FROM schema_meta ORDER BY version")
         ]
     assert {"operation_jobs", "outbox_messages"} <= tables
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
 
 
 def test_schema_migration_upgrades_v2_queue_rows_and_adds_leases(
@@ -114,7 +114,7 @@ def test_schema_migration_upgrades_v2_queue_rows_and_adds_leases(
 
     repository = SQLiteRepository(data_dir)
 
-    assert repository.get_schema_version() == 3
+    assert repository.get_schema_version() == SCHEMA_VERSION
     assert repository.list_operation_jobs()[0]["payload"] == {"source": "legacy"}
     assert repository.list_outbox_messages()[0]["payload"] == {"subject": "legacy"}
     with sqlite3.connect(database) as connection:
@@ -126,6 +126,33 @@ def test_schema_migration_upgrades_v2_queue_rows_and_adds_leases(
         }
     assert {"lease_until_epoch", "heartbeat_at"} <= operation_columns
     assert {"lease_until_epoch", "heartbeat_at"} <= outbox_columns
+
+
+def test_v4_feedback_reminders_and_timeline_are_durable(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "data")
+    feedback = repository.upsert_job_feedback(
+        "a" * 32,
+        "saved",
+        job={"title": "AI 实习生", "company": "星云智能"},
+    )
+    assert feedback["action"] == "saved"
+    assert repository.list_job_feedback()[0]["job"]["title"] == "AI 实习生"
+
+    application = repository.add_application(
+        {
+            "company_name": "星云智能",
+            "job_title": "AI 实习生",
+            "status": "已投递",
+            "job_key": "a" * 32,
+            "next_action": "准备项目复盘",
+            "follow_up_at": "2099-08-10T02:00:00+00:00",
+        }
+    )
+    repository.update_application(application["id"], {"status": "面试中"})
+
+    assert repository.get_application(application["id"])["next_action"] == "准备项目复盘"
+    events = repository.list_application_events(application["id"])
+    assert [event["event_type"] for event in events] == ["status_changed", "created"]
 
 
 def test_unversioned_legacy_database_is_adopted_idempotently(tmp_path: Path) -> None:

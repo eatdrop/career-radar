@@ -6,8 +6,8 @@
   <meta name="description" content="智职引擎每日求职雷达：自动聚合、过滤、匹配岗位，并给出逐岗简历建议。">
   <title>智职引擎 · 每日求职雷达</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/styles.css?v=1.2.0-ui1">
-  <script src="/assets/app.js?v=1.2.0-ui1" defer></script>
+  <link rel="stylesheet" href="/assets/styles.css?v=1.3.0-ui1">
+  <script src="/assets/app.js?v=1.3.0-ui1" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -60,7 +60,7 @@
 
       <div class="sidebar-footer">
         <span>LOCAL FIRST</span>
-        <span>v1.2</span>
+        <span>v1.3</span>
       </div>
     </aside>
 
@@ -116,6 +116,25 @@
               </div>
             </div>
           </div>
+
+          <section class="onboarding-card" id="onboardingCard" aria-labelledby="onboardingTitle">
+            <div class="onboarding-copy">
+              <span class="eyebrow">QUICK START</span>
+              <h3 id="onboardingTitle">10 分钟获得第一批可信推荐</h3>
+              <p id="onboardingProgress">完成下面 3 步，雷达就能开始替你筛岗位。</p>
+            </div>
+            <div class="onboarding-steps">
+              <button type="button" data-switch-panel="resume" id="onboardingResume">
+                <span>1</span><strong>建立简历画像</strong><small>让匹配有事实依据</small>
+              </button>
+              <button type="button" data-switch-panel="preferences" id="onboardingPreferences">
+                <span>2</span><strong>确认求职目标</strong><small>城市、方向与硬门槛</small>
+              </button>
+              <button type="button" data-switch-panel="jobs" id="onboardingJobs">
+                <span>3</span><strong>准备岗位来源</strong><small>导入岗位或使用演示数据</small>
+              </button>
+            </div>
+          </section>
 
           <div class="workflow-strip" aria-label="每日求职雷达工作流">
             <div class="workflow-node">
@@ -579,6 +598,8 @@
             <article><span>面试中</span><strong id="appInterviewing">0</strong></article>
             <article class="positive"><span>已录用</span><strong id="appOffered">0</strong></article>
             <article class="negative"><span>已拒绝</span><strong id="appRejected">0</strong></article>
+            <article class="attention"><span>7 天内待办</span><strong id="appDueSoon">0</strong></article>
+            <article><span>回复率</span><strong id="appResponseRate">0%</strong></article>
           </div>
 
           <article class="surface">
@@ -603,7 +624,7 @@
             <div class="table-wrap">
               <table>
                 <caption class="sr-only">投递记录</caption>
-                <thead><tr><th scope="col">公司 / 岗位</th><th scope="col">投递日期</th><th scope="col">状态</th><th scope="col">备注</th><th scope="col">操作</th></tr></thead>
+                <thead><tr><th scope="col">公司 / 岗位</th><th scope="col">投递日期</th><th scope="col">状态</th><th scope="col">下一步 / 时间</th><th scope="col">操作</th></tr></thead>
                 <tbody id="applicationsBody"></tbody>
               </table>
               <div class="inline-empty" id="applicationsEmpty">暂无投递记录。从今日推荐中添加，或者手动新增。</div>
@@ -637,6 +658,8 @@
       </div>
       <input type="hidden" id="applicationId">
       <input type="hidden" id="applicationJobDescription">
+      <input type="hidden" id="applicationJobKey">
+      <input type="hidden" id="applicationSourceUrl">
       <div class="form-grid">
         <label class="field">
           <span>公司名称</span>
@@ -645,6 +668,26 @@
         <label class="field">
           <span>岗位名称</span>
           <input type="text" id="applicationTitle" maxlength="100" required>
+        </label>
+      </div>
+      <div class="form-grid">
+        <label class="field">
+          <span>跟进时间</span>
+          <input type="datetime-local" id="applicationFollowUp">
+        </label>
+        <label class="field">
+          <span>面试时间</span>
+          <input type="datetime-local" id="applicationInterviewAt">
+        </label>
+      </div>
+      <div class="form-grid">
+        <label class="field">
+          <span>下一步行动</span>
+          <input type="text" id="applicationNextAction" maxlength="300" placeholder="例如：发送跟进邮件">
+        </label>
+        <label class="field">
+          <span>简历版本</span>
+          <input type="text" id="applicationResumeVersion" maxlength="100" placeholder="例如：AI应用-v3">
         </label>
       </div>
       <div class="form-grid">

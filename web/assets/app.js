@@ -32,6 +32,7 @@ const state = {
   radar: null,
   radarItems: [],
   savedJobKeys: new Set(),
+  jobFeedback: new Map(),
   jobPool: [],
   applications: [],
   resumeMode: "text",
@@ -87,6 +88,7 @@ function storeSavedJobKeys() {
 }
 
 function jobIdentity(job) {
+  if (/^[a-f0-9]{32}$/.test(job.job_key || "")) return job.job_key;
   const canonicalUrl = /^https?:\/\//i.test(job.url || "") ? job.url.trim() : "";
   return canonicalUrl || [job.company, job.title, job.location]
     .map((value) => String(value || "").trim().toLocaleLowerCase("zh-CN"))
@@ -115,6 +117,28 @@ function setSaveButtonState(button, saved) {
 
 function syncSavedCount() {
   byId("radarSavedCount").textContent = String(state.savedJobKeys.size);
+}
+
+async function setJobFeedback(job, action, reason = "") {
+  const jobKey = jobIdentity(job);
+  if (!/^[a-f0-9]{32}$/.test(jobKey)) {
+    throw new Error("这个岗位缺少可持久化标识，请重新运行雷达后再试。");
+  }
+  const result = await apiRequest("/jobs/feedback", {
+    method: "POST",
+    body: { job_key: jobKey, action, reason, job },
+  });
+  if (result.action) state.jobFeedback.set(jobKey, result.action);
+  else state.jobFeedback.delete(jobKey);
+  return result;
+}
+
+function freshnessLabel(job) {
+  if (job.user_action === "applied") return ["已建档", "is-applied"];
+  if (job.freshness === "fresh") return ["7 天内发布", "is-fresh"];
+  if (job.freshness === "aging") return ["发布时间较早", "is-aging"];
+  if (job.freshness === "expired") return ["可能已截止", "is-expired"];
+  return [job.posted_label || "发布时间待核验", "is-unknown"];
 }
 
 function resetRadarFilters() {
@@ -330,6 +354,36 @@ function localDateInputValue(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+function datetimeLocalInputValue(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  const hour = String(parsed.getHours()).padStart(2, "0");
+  const minute = String(parsed.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
+function renderOnboarding(onboarding = {}) {
+  const steps = [
+    ["onboardingResume", Boolean(onboarding.resume_ready)],
+    ["onboardingPreferences", Boolean(onboarding.preferences_ready)],
+    ["onboardingJobs", Boolean(onboarding.jobs_ready)],
+  ];
+  const completed = steps.filter(([, ready]) => ready).length;
+  steps.forEach(([id, ready]) => {
+    const button = byId(id);
+    button.classList.toggle("is-complete", ready);
+    button.querySelector("span").textContent = ready ? "✓" : button.id === "onboardingResume" ? "1" : button.id === "onboardingPreferences" ? "2" : "3";
+  });
+  byId("onboardingProgress").textContent = completed === 3
+    ? "准备完成。现在运行雷达，获得第一批推荐。"
+    : `已完成 ${completed}/3 步；系统会保存进度。`;
+  byId("onboardingCard").classList.toggle("is-complete", completed === 3);
+}
+
 function splitList(value) {
   return String(value || "")
     .split(/[,，\n]/)
@@ -472,7 +526,13 @@ function renderRadarDigest(digest) {
     `${formatDate(digest.generated_at)} · 从 ${summary.collected || 0} 个岗位中筛出 ${summary.shortlisted || 0} 个，按简历证据排序。`;
   renderFilterLog(digest.filter_breakdown || []);
 
-  const items = Array.isArray(digest.items) ? digest.items : [];
+  const items = Array.isArray(digest.items)
+    ? digest.items.filter((job) => !["dismissed", "expired"].includes(job.user_action))
+    : [];
+  items.forEach((job) => {
+    if (job.user_action) state.jobFeedback.set(jobIdentity(job), job.user_action);
+    if (job.user_action === "saved") state.savedJobKeys.add(jobIdentity(job));
+  });
   state.radarItems = items;
   panel.classList.toggle("has-results", items.length > 0);
   empty.hidden = items.length > 0;
@@ -507,7 +567,7 @@ function createRecommendationCard(job, rank) {
   save.append(make("span", { text: "☆" }));
   save.firstElementChild.setAttribute("aria-hidden", "true");
   setSaveButtonState(save, state.savedJobKeys.has(jobIdentity(job)));
-  save.addEventListener("click", () => {
+  save.addEventListener("click", async () => {
     const key = jobIdentity(job);
     const willSave = !state.savedJobKeys.has(key);
     if (willSave) state.savedJobKeys.add(key);
@@ -518,12 +578,15 @@ function createRecommendationCard(job, rank) {
     if (byId("radarSavedOnly").getAttribute("aria-pressed") === "true") {
       renderRadarItems();
     }
-    showToast(
-      stored
-        ? willSave ? "已收藏岗位。" : "已取消收藏。"
-        : "当前浏览器无法保存收藏状态。",
-      stored ? "info" : "warning",
-    );
+    try {
+      await setJobFeedback(job, willSave ? "saved" : "clear");
+      showToast(willSave ? "已收藏岗位，刷新后仍会保留。" : "已取消收藏。");
+    } catch (error) {
+      showToast(
+        stored ? `${errorMessage(error)}；已暂存于当前浏览器。` : errorMessage(error),
+        "warning",
+      );
+    }
   });
   append(heading, titleGroup, save);
   main.append(heading);
@@ -533,6 +596,11 @@ function createRecommendationCard(job, rank) {
     job.location || "地点未注明",
     job.source || "未知来源",
   ].forEach((value) => meta.append(make("span", { text: value })));
+  const [freshnessText, freshnessClass] = freshnessLabel(job);
+  meta.append(make("span", {
+    className: `freshness-badge ${freshnessClass}`,
+    text: freshnessText,
+  }));
   main.append(meta);
   main.append(make("p", { className: "fit-reason", text: job.why_fit || "请结合岗位详情进一步核验。" }));
   const chips = make("div", { className: "chip-cloud" });
@@ -576,6 +644,37 @@ function createRecommendationCard(job, rank) {
   });
   track.addEventListener("click", () => openApplicationDialog(null, job));
   actions.append(track);
+  const dismiss = make("button", {
+    className: "text-button",
+    type: "button",
+    text: "不感兴趣",
+  });
+  dismiss.addEventListener("click", async () => {
+    try {
+      await setJobFeedback(job, "dismissed", "用户主动忽略");
+      state.radarItems = state.radarItems.filter((item) => jobIdentity(item) !== jobIdentity(job));
+      renderRadarItems();
+      showToast("已忽略，后续雷达不会重复推荐这个岗位。");
+    } catch (error) {
+      showToast(errorMessage(error), "error");
+    }
+  });
+  const expired = make("button", {
+    className: "text-button danger",
+    type: "button",
+    text: "岗位失效",
+  });
+  expired.addEventListener("click", async () => {
+    try {
+      await setJobFeedback(job, "expired", "用户标记岗位已失效");
+      state.radarItems = state.radarItems.filter((item) => jobIdentity(item) !== jobIdentity(job));
+      renderRadarItems();
+      showToast("已标记失效，不再参与后续推荐。");
+    } catch (error) {
+      showToast(errorMessage(error), "error");
+    }
+  });
+  append(actions, dismiss, expired);
   side.append(actions);
   append(card, score, main, side);
   return card;
@@ -1289,6 +1388,8 @@ function renderApplicationStats(statistics) {
     }[status];
     byId(id).textContent = String(stats.by_status?.[status] || 0);
   });
+  byId("appDueSoon").textContent = String(stats.due_soon || 0);
+  byId("appResponseRate").textContent = `${stats.response_rate || 0}%`;
 }
 
 function renderApplications(result) {
@@ -1314,12 +1415,23 @@ function renderApplications(result) {
     remove.addEventListener("click", () => deleteApplication(record));
     append(actionWrap, edit, remove);
     actions.append(actionWrap);
+    const nextStep = make("td");
+    append(
+      nextStep,
+      make("strong", { text: record.next_action || record.notes || "待补充下一步" }),
+      make("small", {
+        className: record.follow_up_at && new Date(record.follow_up_at) < new Date() ? "is-overdue" : "",
+        text: record.interview_at
+          ? `面试 ${formatDate(record.interview_at)}`
+          : record.follow_up_at ? `跟进 ${formatDate(record.follow_up_at)}` : "未设置提醒",
+      }),
+    );
     append(
       row,
       identity,
       make("td", { text: String(record.applied_at || "").slice(0, 10) || "—" }),
       statusCell,
-      make("td", { text: record.notes || "—" }),
+      nextStep,
       actions,
     );
     body.append(row);
@@ -1343,6 +1455,8 @@ function openApplicationDialog(record = null, job = null) {
   byId("applicationId").value = record?.id || "";
   byId("applicationJobDescription").value =
     record?.job_description || job?.description || job?.job_description || "";
+  byId("applicationJobKey").value = record?.job_key || job?.job_key || "";
+  byId("applicationSourceUrl").value = record?.source_url || job?.url || "";
   byId("applicationCompany").value = record?.company_name || job?.company || "";
   byId("applicationTitle").value = record?.job_title || job?.title || "";
   byId("applicationStatus").value = record?.status || "submitted";
@@ -1352,6 +1466,10 @@ function openApplicationDialog(record = null, job = null) {
   byId("applicationLocation").value = record?.location || job?.location || "";
   byId("applicationSalary").value = record?.salary_range || job?.salary || "";
   byId("applicationNotes").value = record?.notes || "";
+  byId("applicationNextAction").value = record?.next_action || "";
+  byId("applicationResumeVersion").value = record?.resume_version || "";
+  byId("applicationFollowUp").value = datetimeLocalInputValue(record?.follow_up_at);
+  byId("applicationInterviewAt").value = datetimeLocalInputValue(record?.interview_at);
   byId("applicationCompany").disabled = editing;
   byId("applicationTitle").disabled = editing;
   byId("applicationDate").disabled = editing;
@@ -1373,6 +1491,10 @@ async function saveApplication(event) {
           notes: byId("applicationNotes").value.trim(),
           location: byId("applicationLocation").value.trim(),
           salary_range: byId("applicationSalary").value.trim(),
+          next_action: byId("applicationNextAction").value.trim(),
+          resume_version: byId("applicationResumeVersion").value.trim(),
+          follow_up_at: byId("applicationFollowUp").value,
+          interview_at: byId("applicationInterviewAt").value,
         },
       });
     } else {
@@ -1382,10 +1504,16 @@ async function saveApplication(event) {
           company_name: byId("applicationCompany").value.trim(),
           job_title: byId("applicationTitle").value.trim(),
           job_description: byId("applicationJobDescription").value,
+          job_key: byId("applicationJobKey").value,
+          source_url: byId("applicationSourceUrl").value,
           status: byId("applicationStatus").value,
           applied_at: byId("applicationDate").value,
           location: byId("applicationLocation").value.trim(),
           salary_range: byId("applicationSalary").value.trim(),
+          next_action: byId("applicationNextAction").value.trim(),
+          resume_version: byId("applicationResumeVersion").value.trim(),
+          follow_up_at: byId("applicationFollowUp").value,
+          interview_at: byId("applicationInterviewAt").value,
           notes: byId("applicationNotes").value.trim(),
         },
       });
@@ -1423,6 +1551,7 @@ async function loadDashboard() {
   state.dashboard = dashboard;
   byId("jobPoolCount").textContent = String(dashboard.jobs || 0);
   renderApplicationStats(dashboard.applications);
+  renderOnboarding(dashboard.onboarding);
   if (dashboard.radar?.settings) renderSettings(dashboard.radar.settings);
 }
 
@@ -1434,6 +1563,16 @@ async function loadRadar() {
 async function loadJobPool() {
   const result = await apiRequest("/jobs");
   renderJobPool(result.items);
+}
+
+async function loadJobFeedback() {
+  const result = await apiRequest("/jobs/feedback");
+  (result.items || []).forEach((item) => {
+    state.jobFeedback.set(item.job_key, item.action);
+    if (item.action === "saved") state.savedJobKeys.add(item.job_key);
+  });
+  storeSavedJobKeys();
+  syncSavedCount();
 }
 
 function bindEvents() {
@@ -1564,6 +1703,9 @@ async function initialise() {
   syncRadarRunButtons();
   switchPanel(location.hash.slice(1) || "radar", false);
   resumeStoredRadarRun();
+  await loadJobFeedback().catch(() => {
+    showToast("岗位反馈暂时无法同步，收藏仍会保存在当前浏览器。", "warning");
+  });
   const healthTask = loadHealth().catch((error) => {
     renderHealthFailure();
     showToast(errorMessage(error), "error", 6500);

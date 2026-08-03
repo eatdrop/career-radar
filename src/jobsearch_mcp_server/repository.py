@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_LEASE_SECONDS = 300
 _OPERATION_RECONCILIATION_MARKER = (
     "worker lease expired at retry limit; one reconciliation attempt granted"
@@ -90,6 +90,7 @@ class SQLiteRepository:
                     1: self._migrate_v1,
                     2: self._migrate_v2,
                     3: self._migrate_v3,
+                    4: self._migrate_v4,
                 }
                 for version in range(current_version + 1, SCHEMA_VERSION + 1):
                     migrations[version](connection)
@@ -347,6 +348,61 @@ class SQLiteRepository:
             """
             CREATE INDEX IF NOT EXISTS idx_outbox_messages_lease
             ON outbox_messages(status, lease_until_epoch)
+            """
+        )
+
+    @staticmethod
+    def _migrate_v4(connection: sqlite3.Connection) -> None:
+        """Add job feedback, reminders and an application activity timeline."""
+        for statement in (
+            "ALTER TABLE applications ADD COLUMN job_key TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE applications ADD COLUMN source_url TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE applications ADD COLUMN next_action TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE applications ADD COLUMN follow_up_at TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE applications ADD COLUMN interview_at TEXT NOT NULL DEFAULT ''",
+        ):
+            connection.execute(statement)
+        connection.execute(
+            """
+            CREATE TABLE job_feedback (
+                job_key TEXT PRIMARY KEY,
+                action TEXT NOT NULL
+                    CHECK(action IN ('saved', 'dismissed', 'expired', 'applied')),
+                reason TEXT NOT NULL DEFAULT '',
+                job_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE application_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(application_id) REFERENCES applications(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX idx_job_feedback_action_updated
+            ON job_feedback(action, updated_at DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX idx_application_events_application
+            ON application_events(application_id, created_at DESC, id DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX idx_applications_follow_up
+            ON applications(follow_up_at, interview_at)
             """
         )
 
@@ -1485,6 +1541,69 @@ class SQLiteRepository:
         with self._connection() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM resumes").fetchone()[0])
 
+    def upsert_job_feedback(
+        self,
+        job_key: str,
+        action: str,
+        reason: str = "",
+        job: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        encoded_job = self._encode_json(job or {})
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO job_feedback(
+                    job_key, action, reason, job_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_key) DO UPDATE SET
+                    action = excluded.action,
+                    reason = excluded.reason,
+                    job_json = CASE
+                        WHEN excluded.job_json = '{}' THEN job_feedback.job_json
+                        ELSE excluded.job_json
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (job_key, action, reason, encoded_job, now, now),
+            )
+            connection.commit()
+        return self.get_job_feedback(job_key) or {}
+
+    def get_job_feedback(self, job_key: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM job_feedback WHERE job_key = ?", (job_key,)
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["job"] = self._decode_json(item.pop("job_json"), {})
+        return item
+
+    def list_job_feedback(self, limit: int = 500) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM job_feedback
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(2_000, limit)),),
+            ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["job"] = self._decode_json(item.pop("job_json"), {})
+            output.append(item)
+        return output
+
+    def delete_job_feedback(self, job_key: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute("DELETE FROM job_feedback WHERE job_key = ?", (job_key,))
+            connection.commit()
+        return cursor.rowcount > 0
+
     def add_application(self, values: dict[str, str]) -> dict[str, Any]:
         now = utc_now()
         applied_at = values.get("applied_at") or now
@@ -1493,9 +1612,10 @@ class SQLiteRepository:
                 """
                 INSERT INTO applications(
                     company_name, job_title, job_description, salary_range,
-                    location, resume_version, status, notes, applied_at, updated_at
+                    location, resume_version, status, notes, applied_at, updated_at,
+                    job_key, source_url, next_action, follow_up_at, interview_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     values["company_name"],
@@ -1508,9 +1628,21 @@ class SQLiteRepository:
                     values.get("notes", ""),
                     applied_at,
                     now,
+                    values.get("job_key", ""),
+                    values.get("source_url", ""),
+                    values.get("next_action", ""),
+                    values.get("follow_up_at", ""),
+                    values.get("interview_at", ""),
                 ),
             )
             application_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO application_events(application_id, event_type, detail, created_at)
+                VALUES (?, 'created', ?, ?)
+                """,
+                (application_id, values["status"], now),
+            )
             connection.commit()
         return self.get_application(application_id) or {}
 
@@ -1556,7 +1688,17 @@ class SQLiteRepository:
     ) -> dict[str, Any] | None:
         if not fields:
             return self.get_application(application_id)
-        allowed = {"status", "notes", "salary_range", "location", "job_description"}
+        allowed = {
+            "status",
+            "notes",
+            "salary_range",
+            "location",
+            "job_description",
+            "resume_version",
+            "next_action",
+            "follow_up_at",
+            "interview_at",
+        }
         selected = {key: value for key, value in fields.items() if key in allowed}
         if not selected:
             return self.get_application(application_id)
@@ -1564,9 +1706,24 @@ class SQLiteRepository:
         assignments = ", ".join(f"{key} = ?" for key in selected)
         params = [*selected.values(), application_id]
         with self._connection() as connection:
+            previous = connection.execute(
+                "SELECT status FROM applications WHERE id = ?", (application_id,)
+            ).fetchone()
             cursor = connection.execute(
                 f"UPDATE applications SET {assignments} WHERE id = ?", params
             )
+            if cursor.rowcount and "status" in selected and previous:
+                connection.execute(
+                    """
+                    INSERT INTO application_events(application_id, event_type, detail, created_at)
+                    VALUES (?, 'status_changed', ?, ?)
+                    """,
+                    (
+                        application_id,
+                        f"{previous['status']} → {selected['status']}",
+                        selected["updated_at"],
+                    ),
+                )
             connection.commit()
         if cursor.rowcount == 0:
             return None
@@ -1592,11 +1749,49 @@ class SQLiteRepository:
                     """
                 ).fetchone()[0]
             )
+            due_soon = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM applications
+                    WHERE status NOT IN ('已录用', '已拒绝')
+                      AND (
+                        (datetime(follow_up_at) BETWEEN datetime('now') AND datetime('now', '+7 days'))
+                        OR (datetime(interview_at) BETWEEN datetime('now') AND datetime('now', '+7 days'))
+                      )
+                    """
+                ).fetchone()[0]
+            )
+            overdue = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM applications
+                    WHERE status NOT IN ('已录用', '已拒绝')
+                      AND follow_up_at != ''
+                      AND datetime(follow_up_at) < datetime('now')
+                    """
+                ).fetchone()[0]
+            )
         return {
             "total": total,
             "by_status": {row["status"]: int(row["count"]) for row in rows},
             "recent_week": recent,
+            "due_soon": due_soon,
+            "overdue": overdue,
         }
+
+    def list_application_events(self, application_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, application_id, event_type, detail, created_at
+                FROM application_events
+                WHERE application_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (application_id, max(1, min(200, limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def create_radar_run(self, run_id: str, trigger_type: str) -> None:
         with self._connection() as connection:

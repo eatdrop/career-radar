@@ -2353,3 +2353,68 @@ td strong {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* v1.3 activation, freshness and follow-up signals */
+.onboarding-card {
+  display: grid;
+  grid-template-columns: minmax(220px, .72fr) minmax(0, 1.6fr);
+  gap: 24px;
+  align-items: center;
+  margin: 22px 0;
+  padding: 22px;
+  border: 1px solid #dbe5f1;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #f8fbff, #fff);
+}
+
+.onboarding-card.is-complete { border-color: #b8ddcc; background: #f5fbf8; }
+.onboarding-copy h3 { margin: 5px 0 7px; }
+.onboarding-copy p { margin: 0; color: var(--muted); }
+.onboarding-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.onboarding-steps button {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 2px 9px;
+  align-items: center;
+  min-height: 82px;
+  padding: 12px;
+  text-align: left;
+  color: var(--ink);
+  border: 1px solid #e1e8f0;
+  border-radius: 14px;
+  background: #fff;
+  cursor: pointer;
+}
+.onboarding-steps button > span {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: #fff;
+  border-radius: 50%;
+  background: var(--ink);
+}
+.onboarding-steps button small { color: var(--muted); line-height: 1.35; }
+.onboarding-steps button.is-complete { border-color: #b8ddcc; background: #f4fbf7; }
+.onboarding-steps button.is-complete > span { background: #17704d; }
+
+.freshness-badge { font-weight: 700; }
+.freshness-badge.is-fresh, .freshness-badge.is-applied { color: #176b49; background: #e9f7ef; }
+.freshness-badge.is-aging { color: #7a5716; background: #fff5d8; }
+.freshness-badge.is-expired { color: #a33d35; background: #fff0ee; }
+.freshness-badge.is-unknown { color: #526273; background: #edf2f7; }
+.application-metrics .attention { color: #8a5d08; background: #fff9e8; }
+td small.is-overdue { color: #b33b31; font-weight: 700; }
+.table-wrap td strong + small { display: block; margin-top: 5px; color: var(--muted); }
+.recommendation-card .card-actions { flex-wrap: wrap; }
+
+@media (max-width: 900px) {
+  .onboarding-card { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 640px) {
+  .onboarding-card { padding: 17px; }
+  .onboarding-steps { grid-template-columns: 1fr; }
+  .onboarding-steps button { min-height: 68px; }
+}

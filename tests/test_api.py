@@ -102,6 +102,15 @@ def test_full_api_workflow_and_persistence(live_server: str) -> None:
     assert radar["data"]["summary"]["shortlisted"] > 0
 
     top = radar["data"]["items"][0]
+    assert len(top["job_key"]) == 32
+    status, feedback, _ = request_json(
+        live_server,
+        "/api/v1/jobs/feedback",
+        method="POST",
+        body={"job_key": top["job_key"], "action": "saved", "job": top},
+    )
+    assert status == 200
+    assert feedback["data"]["action"] == "saved"
     assert top["resume_evidence"]
     assert top["resume_evidence"][0]["text"]
     persisted_evidence = json.dumps(top["resume_evidence"], ensure_ascii=False)
@@ -111,13 +120,19 @@ def test_full_api_workflow_and_persistence(live_server: str) -> None:
         live_server,
         "/api/v1/applications",
         method="POST",
-        body={"company_name": top["company"], "job_title": top["title"]},
+        body={
+            "company_name": top["company"],
+            "job_title": top["title"],
+            "job_key": top["job_key"],
+            "next_action": "准备投递材料",
+        },
     )
     assert status == 201
 
     status, listing, _ = request_json(live_server, "/api/v1/applications")
     assert status == 200
     assert listing["data"]["statistics"]["total"] == 1
+    assert listing["data"]["items"][0]["next_action"] == "准备投递材料"
     assert listing["data"]["items"][0]["id"] == application["data"]["id"]
     status, dashboard, _ = request_json(live_server, "/api/v1/dashboard")
     assert status == 200
