@@ -22,6 +22,13 @@ def test_job_discovery_experience_contract() -> None:
     assert "window.localStorage.setItem" in script
     assert 'event.key === "/"' in script
     assert "openApplicationDialog(null, job)" in script
+    assert 'id="onboardingCard"' in html
+    assert 'id="applicationFollowUp"' in html
+    assert 'id="applicationNextAction"' in html
+    assert 'apiRequest("/jobs/feedback"' in script
+    assert 'setJobFeedback(job, "dismissed"' in script
+    assert ".onboarding-card" in styles
+    assert ".freshness-badge" in styles
     assert ".has-results .workflow-strip" in styles
     assert "@media (max-width: 640px)" in styles
 
@@ -29,6 +36,6 @@ def test_job_discovery_experience_contract() -> None:
 def test_frontend_assets_are_versioned_with_release() -> None:
     html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
-    assert "/assets/styles.css?v=1.2.0-ui1" in html
-    assert "/assets/app.js?v=1.2.0-ui1" in html
-    assert "<span>v1.2</span>" in html
+    assert "/assets/styles.css?v=1.3.0-ui1" in html
+    assert "/assets/app.js?v=1.3.0-ui1" in html
+    assert "<span>v1.3</span>" in html

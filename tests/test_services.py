@@ -101,6 +101,37 @@ def test_application_crud_and_status_mapping(tmp_path: Path) -> None:
     assert service.list_applications()["statistics"]["total"] == 0
 
 
+def test_job_feedback_filters_future_radar_and_application_tracks_action(tmp_path: Path) -> None:
+    service = CareerService(make_settings(tmp_path))
+    service.analyse_resume({"text": SAMPLE_RESUME})
+    service.update_radar_settings({"sources": ["demo"], "min_score": 0})
+    first = service.run_radar({"sources": ["demo"]})
+    ignored = first["items"][0]
+
+    feedback = service.update_job_feedback(
+        {"job_key": ignored["job_key"], "action": "dismissed", "job": ignored}
+    )
+    assert feedback["action"] == "dismissed"
+    second = service.run_radar({"sources": ["demo"]})
+    assert ignored["job_key"] not in {item["job_key"] for item in second["items"]}
+    assert second["summary"]["filtered_out"] == 1
+
+    tracked = second["items"][0]
+    application = service.add_application(
+        {
+            "company_name": tracked["company"],
+            "job_title": tracked["title"],
+            "job_key": tracked["job_key"],
+            "source_url": tracked["url"],
+            "next_action": "三天后跟进",
+            "follow_up_at": "2099-08-05T09:30",
+        }
+    )
+    assert application["next_action"] == "三天后跟进"
+    assert service.repository.get_job_feedback(tracked["job_key"])["action"] == "applied"
+    assert service.list_applications()["statistics"]["response_rate"] == 0
+
+
 def test_invalid_schedule_and_email_are_rejected(tmp_path: Path) -> None:
     service = CareerService(make_settings(tmp_path))
 
@@ -162,7 +193,8 @@ def test_privacy_mode_keeps_redacted_evidence_without_raw_contacts(tmp_path: Pat
     assert stored["structured"]["basic_info"]["phone"] == ""
     persisted_profile = json.dumps(stored, ensure_ascii=False)
     assert "project-owner@example.com" not in persisted_profile
-    assert "415" not in persisted_profile
+    assert "+1 (415) 555-2671" not in persisted_profile
+    assert "555-2671" not in persisted_profile
     assert "private-student" not in persisted_profile
     assert "private_wechat" not in persisted_profile
 

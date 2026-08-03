@@ -314,6 +314,10 @@ class CareerRequestHandler(SimpleHTTPRequestHandler):
             return service.crawl_jobs(payload), 200
         if method == "GET" and path == "/api/v1/jobs":
             return service.get_job_pool(), 200
+        if method == "GET" and path == "/api/v1/jobs/feedback":
+            return service.list_job_feedback(), 200
+        if method == "POST" and path == "/api/v1/jobs/feedback":
+            return service.update_job_feedback(payload), 200
         if method == "POST" and path == "/api/v1/jobs/import":
             return service.import_jobs(payload), 201
         if method == "POST" and path == "/api/v1/jobs/match":

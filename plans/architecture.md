@@ -13,6 +13,8 @@ flowchart LR
     Digest --> Web["站内工作台"]
     Digest --> Email["SMTP 邮件（可选）"]
     Digest --> CRM["投递看板"]
+    CRM --> Feedback["收藏 / 忽略 / 失效 / 已投递反馈"]
+    Feedback --> Filter
 ```
 
 ## 运行架构
@@ -50,5 +52,7 @@ SQLite 数据库包含：
 - `app_state`：岗位池、偏好和最新摘要；
 - `radar_runs`：工作流运行审计；
 - `applications`：投递 CRM。
+- `job_feedback`：岗位收藏、忽略、失效与已投递反馈；
+- `application_events`：投递状态变更时间线。
 
 所有连接启用 WAL、`busy_timeout` 和外键约束。运行数据由 `APP_DATA_DIR` 指定，不写入安装目录。

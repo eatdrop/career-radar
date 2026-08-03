@@ -18,7 +18,7 @@ import time
 import uuid
 import zipfile
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from email.message import EmailMessage
 from io import BytesIO
 from typing import Any
@@ -26,6 +26,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
+from zoneinfo import ZoneInfo
 
 from . import __version__
 from .config import Settings
@@ -45,6 +46,7 @@ STORAGE_TO_STATUS = {value: key for key, value in STATUS_TO_STORAGE.items()}
 
 CITIES = ("北京", "上海", "广州", "深圳", "杭州", "成都", "南京", "武汉", "西安")
 TEMPLATES = {"standard", "technical", "concise"}
+JOB_FEEDBACK_ACTIONS = {"saved", "dismissed", "expired", "applied"}
 
 MAX_RESUME_TEXT_CHARS = 100_000
 MAX_RESUME_LINE_CHARS = 12_000
@@ -519,8 +521,42 @@ def _safe_external_url(value: Any) -> str:
     return candidate
 
 
+def _job_key(raw: dict[str, Any]) -> str:
+    url = _safe_external_url(raw.get("url"))
+    identity = url or "|".join(
+        re.sub(r"\s+", "", str(raw.get(field) or "")).lower()
+        for field in ("company", "title", "location", "source")
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def _job_freshness(posted_at: str, deadline_at: str) -> str:
+    now = datetime.now(UTC)
+    if deadline_at:
+        try:
+            deadline = datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            if deadline < now:
+                return "expired"
+        except ValueError:
+            pass
+    if posted_at:
+        try:
+            posted = datetime.fromisoformat(posted_at.replace("Z", "+00:00"))
+            if posted.tzinfo is None:
+                posted = posted.replace(tzinfo=UTC)
+            age = now - posted.astimezone(UTC)
+            return "fresh" if age <= timedelta(days=7) else "aging"
+        except ValueError:
+            pass
+    return "unknown"
+
+
 def _normalise_job(raw: dict[str, Any], index: int) -> dict[str, Any]:
-    return {
+    posted_at = str(raw.get("posted_at") or raw.get("发布时间") or "")[:40]
+    deadline_at = str(raw.get("deadline_at") or raw.get("截止时间") or "")[:40]
+    job = {
         "id": str(raw.get("id") or f"job-{index}"),
         "title": str(
             raw.get("title") or raw.get("职位名称") or raw.get("position") or "未命名岗位"
@@ -533,7 +569,15 @@ def _normalise_job(raw: dict[str, Any], index: int) -> dict[str, Any]:
         ),
         "source": str(raw.get("source") or raw.get("来源") or "导入"),
         "url": _safe_external_url(raw.get("url")),
+        "posted_at": posted_at,
+        "posted_label": str(raw.get("posted_label") or "")[:80],
+        "deadline_at": deadline_at,
+        "discovered_at": str(raw.get("discovered_at") or datetime.now(UTC).isoformat())[:40],
+        "last_verified_at": str(raw.get("last_verified_at") or "")[:40],
     }
+    job["job_key"] = str(raw.get("job_key") or _job_key(job))[:64]
+    job["freshness"] = _job_freshness(posted_at, deadline_at)
+    return job
 
 
 def _parse_job_text(text: str) -> list[dict[str, Any]]:
@@ -656,6 +700,21 @@ class CareerService:
         self.repository = repository or SQLiteRepository(settings.data_dir)
         self._radar_lock = threading.Lock()
 
+    def _user_datetime(self, value: Any, *, field: str) -> str:
+        text = _clean_text(value, limit=40, field=field)
+        if not text:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise AppError(422, "invalid_datetime", f"{field}格式无效") from exc
+        if parsed.tzinfo is None:
+            try:
+                parsed = parsed.replace(tzinfo=ZoneInfo(self.settings.timezone))
+            except Exception:
+                parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC).isoformat(timespec="seconds")
+
     def capabilities(self) -> dict[str, dict[str, Any]]:
         openai_installed = importlib.util.find_spec("openai") is not None
         selenium_installed = (
@@ -730,10 +789,18 @@ class CareerService:
         jobs = self.repository.get_state("latest_jobs", [])
         stats = self._public_stats(self.repository.application_statistics())
         runs = self.repository.list_radar_runs(1)
+        resume_count = self.repository.count_resumes()
+        job_count = len(jobs) if isinstance(jobs, list) else 0
         return {
-            "jobs": len(jobs) if isinstance(jobs, list) else 0,
-            "resumes": self.repository.count_resumes(),
+            "jobs": job_count,
+            "resumes": resume_count,
             "applications": stats,
+            "onboarding": {
+                "resume_ready": resume_count > 0,
+                "preferences_ready": bool(self.repository.get_state("radar_settings", {})),
+                "jobs_ready": job_count > 0,
+                "radar_ready": bool(runs and runs[0].get("status") == "completed"),
+            },
             "radar": {
                 "last_run": (
                     {key: value for key, value in runs[0].items() if key != "result"}
@@ -847,7 +914,7 @@ class CareerService:
             {key: value for key, value in run.items() if key != "result"}
             for run in self.repository.list_radar_runs(20)
         ]
-        latest = self.repository.get_state("latest_radar", None)
+        latest = self._attach_feedback(self.repository.get_state("latest_radar", None))
         return {
             "settings": self.get_radar_settings(),
             "latest": self._hydrate_email_delivery(latest),
@@ -860,6 +927,18 @@ class CareerService:
                 )
             ],
         }
+
+    def _attach_feedback(self, digest: Any) -> Any:
+        if not isinstance(digest, dict) or not isinstance(digest.get("items"), list):
+            return digest
+        feedback = {item["job_key"]: item["action"] for item in self.repository.list_job_feedback()}
+        output = dict(digest)
+        output["items"] = [
+            {**job, "user_action": feedback.get(str(job.get("job_key") or ""), "")}
+            for job in digest["items"]
+            if isinstance(job, dict)
+        ]
+        return output
 
     def _normalise_radar_request(self, payload: dict[str, Any] | None) -> dict[str, Any]:
         if payload is None:
@@ -1173,14 +1252,36 @@ class CareerService:
                     {"notes": source_notes},
                 )
 
+            jobs = [_normalise_job(job, index) for index, job in enumerate(jobs, 1)]
             deduplicated: dict[str, dict[str, Any]] = {}
             for job in jobs:
-                key = re.sub(r"\s+", "", f"{job.get('company', '')}|{job.get('title', '')}").lower()
+                key = str(job.get("job_key") or _job_key(job))
                 deduplicated.setdefault(key, job)
             jobs = list(deduplicated.values())
             candidate_count = len(jobs)
 
             filtered, rejected = self._filter_radar_jobs(jobs, radar_settings)
+            feedback = {
+                item["job_key"]: item["action"] for item in self.repository.list_job_feedback()
+            }
+            user_filtered: list[dict[str, Any]] = []
+            remaining: list[dict[str, Any]] = []
+            for job in filtered:
+                action = feedback.get(str(job.get("job_key") or ""), "")
+                if action in {"dismissed", "expired"}:
+                    user_filtered.append(
+                        {
+                            **job,
+                            "filter_reason": "用户已忽略"
+                            if action == "dismissed"
+                            else "用户标记失效",
+                        }
+                    )
+                else:
+                    job["user_action"] = action
+                    remaining.append(job)
+            filtered = remaining
+            rejected.extend(user_filtered)
             ranked = self._rank_jobs(resume_text, filtered, int(radar_settings["max_results"]))
             for job in ranked:
                 evidence = self.repository.retrieve_resume_evidence(
@@ -1328,6 +1429,8 @@ class CareerService:
                         "description": item.get("description", ""),
                         "source": "Google Jobs",
                         "url": _safe_external_url(apply_url),
+                        "posted_label": detected.get("posted_at", ""),
+                        "last_verified_at": datetime.now(UTC).isoformat(),
                     }
                 )
         return output
@@ -1637,6 +1740,61 @@ class CareerService:
         )
         return {"items": jobs, "count": len(jobs)}
 
+    def list_job_feedback(self) -> dict[str, Any]:
+        items = self.repository.list_job_feedback()
+        return {
+            "items": [
+                {
+                    "job_key": item["job_key"],
+                    "action": item["action"],
+                    "reason": item["reason"],
+                    "updated_at": item["updated_at"],
+                }
+                for item in items
+            ],
+            "count": len(items),
+        }
+
+    def update_job_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        job_key = _clean_text(payload.get("job_key"), limit=64, field="岗位标识", required=True)
+        if not re.fullmatch(r"[a-f0-9]{32}", job_key):
+            raise AppError(422, "invalid_job_key", "岗位标识无效")
+        action = _clean_text(payload.get("action"), limit=20, field="反馈动作", required=True)
+        if action == "clear":
+            self.repository.delete_job_feedback(job_key)
+            return {"job_key": job_key, "action": "", "deleted": True}
+        if action not in JOB_FEEDBACK_ACTIONS:
+            raise AppError(422, "invalid_feedback_action", "不支持的岗位反馈")
+        reason = _clean_text(payload.get("reason"), limit=300, field="反馈原因")
+        raw_job = payload.get("job")
+        job: dict[str, Any] = {}
+        if raw_job is not None:
+            if not isinstance(raw_job, dict):
+                raise AppError(422, "invalid_job", "岗位快照必须是对象")
+            job = _normalise_job(raw_job, 1)
+            job = {
+                key: job.get(key)
+                for key in (
+                    "job_key",
+                    "id",
+                    "title",
+                    "company",
+                    "salary",
+                    "location",
+                    "source",
+                    "url",
+                    "posted_at",
+                    "deadline_at",
+                )
+            }
+        item = self.repository.upsert_job_feedback(job_key, action, reason, job)
+        return {
+            "job_key": item["job_key"],
+            "action": item["action"],
+            "reason": item["reason"],
+            "updated_at": item["updated_at"],
+        }
+
     def analyse_resume(self, payload: dict[str, Any]) -> dict[str, Any]:
         source_name = "文本粘贴"
         if payload.get("file") is not None:
@@ -1943,6 +2101,9 @@ class CareerService:
                 date.fromisoformat(applied_at[:10])
             except ValueError as exc:
                 raise AppError(422, "invalid_date", "投递日期格式应为 YYYY-MM-DD") from exc
+        job_key = _clean_text(payload.get("job_key"), limit=64, field="岗位标识")
+        if job_key and not re.fullmatch(r"[a-f0-9]{32}", job_key):
+            raise AppError(422, "invalid_job_key", "岗位标识无效")
         values = {
             "company_name": _clean_text(
                 payload.get("company_name"), limit=100, field="公司名称", required=True
@@ -1958,11 +2119,29 @@ class CareerService:
             "resume_version": _clean_text(
                 payload.get("resume_version"), limit=100, field="简历版本"
             ),
+            "job_key": job_key,
+            "source_url": _safe_external_url(payload.get("source_url")),
+            "next_action": _clean_text(payload.get("next_action"), limit=300, field="下一步行动"),
+            "follow_up_at": self._user_datetime(payload.get("follow_up_at"), field="跟进时间"),
+            "interview_at": self._user_datetime(payload.get("interview_at"), field="面试时间"),
             "notes": _clean_text(payload.get("notes"), limit=2_000, field="备注"),
             "status": STATUS_TO_STORAGE[status],
             "applied_at": applied_at,
         }
-        return self._public_application(self.repository.add_application(values))
+        created = self._public_application(self.repository.add_application(values))
+        if job_key:
+            self.repository.upsert_job_feedback(
+                job_key,
+                "applied",
+                job={
+                    "job_key": job_key,
+                    "title": values["job_title"],
+                    "company": values["company_name"],
+                    "location": values["location"],
+                    "url": values["source_url"],
+                },
+            )
+        return created
 
     def update_application(self, application_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         fields: dict[str, str] = {}
@@ -1976,10 +2155,15 @@ class CareerService:
             "salary_range": 60,
             "location": 60,
             "job_description": 20_000,
+            "resume_version": 100,
+            "next_action": 300,
         }
         for field, limit in field_limits.items():
             if field in payload:
                 fields[field] = _clean_text(payload[field], limit=limit, field=field)
+        for field, label in (("follow_up_at", "跟进时间"), ("interview_at", "面试时间")):
+            if field in payload:
+                fields[field] = self._user_datetime(payload[field], field=label)
         if not fields:
             raise AppError(422, "empty_update", "没有可更新的字段")
         row = self.repository.update_application(application_id, fields)
@@ -2002,6 +2186,11 @@ class CareerService:
             "salary_range": row.get("salary_range", ""),
             "location": row.get("location", ""),
             "resume_version": row.get("resume_version", ""),
+            "job_key": row.get("job_key", ""),
+            "source_url": row.get("source_url", ""),
+            "next_action": row.get("next_action", ""),
+            "follow_up_at": row.get("follow_up_at", ""),
+            "interview_at": row.get("interview_at", ""),
             "status": STORAGE_TO_STATUS.get(row.get("status", ""), "submitted"),
             "notes": row.get("notes", ""),
             "applied_at": row.get("applied_at", ""),
@@ -2013,8 +2202,15 @@ class CareerService:
         output = {key: 0 for key in STATUS_TO_STORAGE}
         for storage_status, count in stats.get("by_status", {}).items():
             output[STORAGE_TO_STATUS.get(storage_status, "submitted")] += int(count)
+        total = int(stats.get("total", 0))
+        responses = sum(output[key] for key in ("viewed", "interviewing", "offered", "rejected"))
+        interviews = output["interviewing"] + output["offered"]
         return {
-            "total": int(stats.get("total", 0)),
+            "total": total,
             "recent_week": int(stats.get("recent_week", 0)),
+            "due_soon": int(stats.get("due_soon", 0)),
+            "overdue": int(stats.get("overdue", 0)),
+            "response_rate": round(responses / total * 100) if total else 0,
+            "interview_rate": round(interviews / total * 100) if total else 0,
             "by_status": output,
         }
